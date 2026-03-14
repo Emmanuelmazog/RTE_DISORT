@@ -1,0 +1,3192 @@
+
+\documentclass[a4paper,11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{float}
+% TikZ removido (figuras eliminadas)
+
+\geometry{margin=2cm}
+
+\newtcolorbox{concept}[1]{
+  colback=blue!5!white,
+  colframe=blue!75!black,
+  title={\textbf{#1}}
+}
+
+\newtcolorbox{implementation}[1]{
+  colback=green!5!white,
+  colframe=green!60!black,
+  title={\textbf{Implementaci\'on: #1}}
+}
+
+\newtcolorbox{physics}[1]{
+  colback=orange!5!white,
+  colframe=orange!70!black,
+  title={\textbf{Significado F\'isico: #1}}
+}
+
+\newtcolorbox{keyresult}[1]{
+  colback=red!5!white,
+  colframe=red!70!black,
+  title={\textbf{Resultado Clave: #1}}
+}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red!70!black},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+% Colores para cajas de texto (tcolorbox)
+
+\title{\textbf{Retrieval of Aerosol Optical Properties Using\\
+Radiative Transfer Theory:\\
+A Direct--Inverse Problem Approach}\\[0.5cm]
+\large Derivaci\'on Matem\'atica Completa, Soluci\'on Num\'erica e Integraci\'on\\[0.3cm]
+\normalsize Basado en el m\'etodo DISORT (Stamnes et al., 1988)}
+\author{Emmanuel}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ======================================================================
+\part{Fundamento Te\'orico: La Ecuaci\'on de Transferencia Radiativa}
+% ======================================================================
+
+% ======================================================================
+\section{Introducci\'on y Motivaci\'on}
+% ======================================================================
+
+Este documento presenta la derivaci\'on matem\'atica completa del modelo
+\texttt{1D\_Atmosphere\_Model.py}, que resuelve la Ecuaci\'on de Transferencia
+Radiativa (RTE) mediante el M\'etodo de Ordenadas Discretas (DISORT) y recupera
+propiedades \'opticas de aerosoles mediante m\'ultiples t\'ecnicas de inversi\'on.
+
+\textbf{Objetivo del proyecto:} Dado un perfil atmosf\'erico (espesor \'optico $\tau$,
+albedo de dispersi\'on simple $\omega_0$, par\'ametro de asimetr\'ia $g$ por capa,
+albedo de superficie $A_s$, \'angulo cenital solar $\theta_0$), calcular las
+radiancias ascendentes en el tope de la atm\'osfera (TOA) ---~lo que medir\'ia un
+sat\'elite mirando hacia abajo~--- y luego, a partir de esas radiancias observadas,
+recuperar los par\'ametros atmosf\'ericos originales.
+
+\textbf{El c\'odigo soporta tres niveles de complejidad:}
+\begin{itemize}
+    \item \textbf{Nivel 1} --- Atm\'osfera homog\'enea de 1 capa: recuperaci\'on
+          del Espesor \'Optico de Aerosoles (AOD) mediante LM+Tikhonov y Optimal
+          Estimation.
+    \item \textbf{Nivel 2} --- Atm\'osfera realista de 20 capas (US Standard 1976)
+          con dispersi\'on de Rayleigh, teor\'ia de Mie para aerosoles, y
+          recuperaci\'on conjunta de AOD, SSA y $g$ mediante Optimal Estimation
+          (Rodgers, 2000), Phillips--Twomey, y regularizaci\'on Total Variation.
+    \item \textbf{Nivel 3} --- Aplicaci\'on a datos reales: simulaci\'on con
+          par\'ametros AERONET y recuperaci\'on de AOD a partir de flujos de banda
+          ancha medidos por SURFRAD (fracci\'on difusa) mediante bisecci\'on.
+\end{itemize}
+
+\textbf{Arquitectura del c\'odigo:}
+\begin{itemize}
+    \item \texttt{AtmosphereProfile} --- Perfil \'optico multicapa.
+    \item \texttt{StandardAtmosphere} --- Atm\'osfera US Standard 1976 con 20 capas y Rayleigh.
+    \item \texttt{compute\_aerosol\_optics} --- Teor\'ia de Mie para propiedades de aerosol.
+    \item \texttt{DisortSolver} --- Solucionador directo con delta-M scaling y estabilizaci\'on.
+    \item \texttt{InverseOptimizer} --- Tikhonov + Levenberg--Marquardt.
+    \item \texttt{OptimalEstimation} --- M\'etodo de Rodgers (2000) con diagn\'osticos completos.
+    \item \texttt{PhillipsTwomey} --- Inversi\'on lineal restringida con L-curve.
+    \item \texttt{TotalVariation} --- Regularizaci\'on TV via IRLS.
+\end{itemize}
+
+
+% [Figura 1: Geometr\'ia plano-paralela -- removida por brevedad]
+
+
+% ======================================================================
+\section{La Ecuaci\'on de Transferencia Radiativa}
+% ======================================================================
+
+\subsection{Balance de Energ\'ia en un Camino Infinitesimal}
+
+Un haz de luz con intensidad espectral $I$ [W\,m$^{-2}$\,sr$^{-1}$] recorre
+una distancia $ds$ a trav\'es de un medio con part\'iculas.  La variaci\'on de
+intensidad se debe a:
+
+\begin{enumerate}
+    \item \textbf{Extinci\'on} (p\'erdida): absorci\'on m\'as dispersi\'on fuera
+          del haz:  $\;-\sigma_{\text{ext}}\,I\,ds$.
+    \item \textbf{Fuente} (ganancia): luz dispersada \emph{hacia} el haz desde
+          otras direcciones, m\'as emisi\'on: $\;+\sigma_{\text{ext}}\,J\,ds$.
+\end{enumerate}
+
+\begin{equation}\label{eq:rte_path}
+    \frac{dI}{ds} = \sigma_{\text{ext}}(J - I)
+\end{equation}
+
+\subsection{Coordenadas Verticales y la Variable $\mu$}
+
+En una atm\'osfera plano-paralela, las propiedades dependen solo de la altura
+$z$.  Un fot\'on viaja con \'angulo cenital $\theta$ respecto a la vertical, y
+la proyecci\'on vertical del camino es $dz = ds\cos\theta$.
+
+\begin{concept}{Variable angular $\mu = \cos\theta$}
+\begin{itemize}
+    \item $\mu = +1$: direcci\'on vertical ascendente (cenit)
+    \item $\mu = -1$: direcci\'on vertical descendente (nadir)
+    \item $\mu > 0$: radiaci\'on ascendente (\emph{upwelling});\quad $\mu < 0$: descendente (\emph{downwelling})
+    \item $\mu_0 = \cos\theta_0$: coseno del \'angulo cenital solar
+\end{itemize}
+\end{concept}
+
+Sustituyendo $ds = dz/\mu$:
+\begin{equation}
+    \mu\,\frac{dI}{dz} = \sigma_{\text{ext}}(J - I)
+\end{equation}
+
+\subsection{Espesor \'Optico $\tau$}
+
+\begin{physics}{Espesor \'Optico}
+$\tau$ es una coordenada adimensional que mide la extinci\'on acumulada desde el
+tope de la atm\'osfera (TOA).  Si $\tau = 1$, el medio aten\'ua la luz directa a
+$e^{-1}\approx 37\%$ de su valor original (Ley de Beer--Lambert).
+\end{physics}
+
+\begin{equation}
+    d\tau = -\sigma_{\text{ext}}\,dz
+\end{equation}
+
+El signo negativo asegura que $\tau$ crece desde 0 (TOA) hasta $\tau_{\max}$
+(superficie).  Tras la sustituci\'on:
+
+\begin{equation}\label{eq:rte_tau}
+    \boxed{\mu\,\frac{dI(\tau,\mu,\phi)}{d\tau} = I(\tau,\mu,\phi) - S(\tau,\mu,\phi)}
+\end{equation}
+
+Esta es la ecuaci\'on fundamental (Ec.~1 del reporte DISORT, equivalente a C/I.63
+de Chandrasekhar y TS/2.28 de Thomas \& Stamnes).  Aqu\'i $S$ es la funci\'on
+fuente total que incluye tanto la dispersi\'on como la emisi\'on.
+
+
+% ======================================================================
+\section{La Funci\'on Fuente y Separaci\'on del Haz Directo}
+% ======================================================================
+
+\subsection{Funci\'on Fuente General}
+
+La funci\'on fuente $S$ en la Ec.~\eqref{eq:rte_tau} contiene la dispersi\'on
+m\'ultiple desde todas las direcciones m\'as las fuentes internas (Ec.~2a del
+reporte DISORT):
+
+\begin{equation}\label{eq:source_general}
+    S(\tau,\mu,\phi) = \frac{\omega(\tau)}{4\pi}\int_0^{2\pi}\int_{-1}^{1}
+    P(\tau;\cos\Theta)\,I_{\text{tot}}(\tau,\mu',\phi')\,d\mu'\,d\phi'
+    + Q(\tau,\mu,\phi)
+\end{equation}
+
+donde $P$ es la funci\'on de fase de dispersi\'on, $\omega$ es el albedo de
+dispersi\'on simple, y $Q$ es la fuente interna.  El \'angulo de dispersi\'on
+$\Theta$ satisface (Ec.~2c del reporte):
+
+\begin{equation}\label{eq:cos_theta}
+    \cos\Theta = \mu\mu' + \sqrt{(1-\mu^2)(1-\mu'^2)}\cos(\phi - \phi')
+\end{equation}
+
+\subsection{Separaci\'on Difuso--Directo}
+
+El haz solar directo tiene intensidad angular tipo delta de Dirac (Ec.~3b del
+reporte DISORT):
+\begin{equation}
+    I_{\text{direct}} = I_0\,e^{-\tau/\mu_0}\,\delta(\mu+\mu_0)\,\delta(\phi-\phi_0)
+\end{equation}
+
+La transformaci\'on difuso-directa (TS/6.2) separa:
+\begin{equation}
+    I_{\text{tot}} = I_{\text{direct}} + I_{\text{diffuse}}
+\end{equation}
+
+Al sustituir en la integral de dispersi\'on y usar la propiedad de la delta de
+Dirac ($\int f(x)\delta(x-a)\,dx = f(a)$), se genera un t\'ermino de
+\textbf{pseudo-fuente del haz} (Ec.~3d del reporte):
+
+\begin{equation}\label{eq:q_beam}
+    Q^{(\text{beam})}(\tau,\mu,\phi) = \frac{\omega(\tau)}{4\pi}\,I_0\,
+    P(\tau;\mu,\phi;-\mu_0,\phi_0)\,e^{-\tau/\mu_0}
+\end{equation}
+
+\begin{physics}{Por qu\'e se separa el haz directo}
+La delta de Dirac no se puede representar con cuadratura num\'erica (ning\'un
+punto discreto coincide exactamente con $\mu_0$).  Al evaluarla
+anal\'iticamente, se evita un error sistem\'atico.  La parte difusa restante
+es suave en $\mu'$ y se aproxima bien con cuadratura.  Esta separaci\'on la
+introduce Chandrasekhar (1950) y es est\'andar en DISORT.
+\end{physics}
+
+En general, la fuente total es (Ec.~3e del reporte):
+\begin{equation}
+    Q = Q^{(\text{thermal})} + Q^{(\text{beam})}
+\end{equation}
+
+donde $Q^{(\text{thermal})} = (1-\omega)\,B[T(\tau)]$ es la emisi\'on de Planck
+(despreciable en el visible/UV).  De aqu\'i en adelante, $I \equiv I_{\text{diffuse}}$
+(Ec.~4 del reporte).
+
+
+% ======================================================================
+\section{Funci\'on de Fase y su Expansi\'on en Legendre}
+% ======================================================================
+
+\subsection{Separaci\'on de la Dependencia Azimutal}
+
+La funci\'on de fase depende solo del \'angulo de dispersi\'on $\Theta$ (Ec.~2b
+del reporte), lo cual permite factorizar la dependencia en $\phi$.  Se expande
+$P$ en $2M$ polinomios de Legendre (Ec.~5a del reporte):
+
+\begin{equation}\label{eq:phase_legendre}
+    P(\cos\Theta) = \sum_{l=0}^{2M-1}(2l+1)\,g_l\,P_l(\cos\Theta)
+\end{equation}
+
+donde $g_l$ son los momentos de Legendre de la funci\'on de fase
+(con $g_0 = 1$ por normalizaci\'on).
+
+Usando el teorema de adici\'on de arm\'onicos esf\'ericos (Ec.~5c del reporte):
+\begin{equation}
+    P_l(\cos\Theta) = P_l^0(\mu)P_l^0(\mu') +
+    2\sum_{m=1}^{l}\frac{(l-m)!}{(l+m)!}P_l^m(\mu)P_l^m(\mu')\cos m(\phi-\phi')
+\end{equation}
+
+la intensidad y la funci\'on fuente se descomponen en series de Fourier en
+$\phi$ (Ec.~6 del reporte para la intensidad; Ec.~8a para la fuente):
+\begin{equation}\label{eq:fourier_decomp}
+    I(\tau,\mu,\phi) = \sum_{m=0}^{2M-1}I^m(\tau,\mu)\cos m(\phi-\phi_0)
+\end{equation}
+
+Cada componente azimutal $m$ satisface una ecuaci\'on independiente (Ec.~7 del reporte):
+\begin{equation}\label{eq:rte_azimuthal}
+    \mu\,\frac{dI^m}{d\tau} = I^m - \frac{\omega}{2}\sum_{l=m}^{2M-1}
+    (2l+1)g_l\,\Lambda_l^m(\mu)\int_{-1}^{1}\Lambda_l^m(\mu')\,I^m(\tau,\mu')\,d\mu'
+    - X_0^m(\mu)\,e^{-\tau/\mu_0}
+\end{equation}
+
+donde $\Lambda_l^m$ son los polinomios de Legendre asociados normalizados
+y $X_0^m$ es el t\'ermino de fuente del haz para la componente $m$.
+
+\begin{concept}{Simplificaci\'on en nuestro c\'odigo}
+Nuestro c\'odigo asume \textbf{simetr\'ia azimutal} ($m = 0$ solamente), lo que
+significa que la intensidad no depende de $\phi$.  Esto es v\'alido cuando:
+\begin{itemize}
+    \item La funci\'on de fase es de Henyey--Greenstein (sim\'etrica en $\phi$).
+    \item La superficie es Lambertiana (reflexi\'on isotr\'opica).
+    \item Solo nos interesan flujos integrados azimutalmente.
+\end{itemize}
+Con $m=0$, los $\Lambda_l^0(\mu) = P_l(\mu)$ son los polinomios de Legendre
+ordinarios, y la RTE se reduce a la Ec.~\eqref{eq:rte_full} m\'as adelante.
+\end{concept}
+
+\subsection{Aproximaci\'on de Henyey--Greenstein}
+
+La funci\'on de fase exacta requiere la teor\'ia de Mie (Secci\'on~\ref{sec:mie}).
+La parametrizaci\'on de Henyey--Greenstein (HG) la reemplaza con un solo
+par\'ametro:
+
+\begin{equation}
+    P_{\text{HG}}(\cos\Theta) = \frac{1-g^2}{(1+g^2-2g\cos\Theta)^{3/2}}
+\end{equation}
+
+\begin{physics}{Par\'ametro de asimetr\'ia $g$}
+\begin{equation}
+    g = \langle\cos\Theta\rangle = \frac{1}{2}\int_{-1}^{1}\cos\Theta\,P(\cos\Theta)\,d(\cos\Theta)
+\end{equation}
+\begin{itemize}
+    \item $g=0$: dispersi\'on isotr\'opica (Rayleigh, mol\'eculas de aire)
+    \item $g\approx 0.6$--$0.7$: forward scattering dominante (aerosoles t\'ipicos)
+    \item $g\to 1$: dispersi\'on casi completamente frontal (gotas grandes de nube)
+\end{itemize}
+\end{physics}
+
+\subsection{Coeficientes de Legendre: $\chi_l = (2l+1)\,g^l$}
+
+Los coeficientes de la expansi\'on en Legendre de la funci\'on de fase
+se obtienen de la \textbf{funci\'on generatriz} de los polinomios de Legendre:
+
+\begin{equation}
+    \frac{1}{\sqrt{1 - 2\mu t + t^2}} = \sum_{l=0}^{\infty} P_l(\mu)\,t^l
+    \qquad |t| < 1
+\end{equation}
+
+Derivando ambos lados y multiplicando por $(1-t^2)$:
+\begin{equation}
+    \frac{1-t^2}{(1 - 2\mu t + t^2)^{3/2}} = \sum_{l=0}^{\infty}(2l+1)\,P_l(\mu)\,t^l
+\end{equation}
+
+Con $t = g$, el lado izquierdo es \emph{exactamente} $P_{\text{HG}}(\mu)$:
+\begin{equation}
+    P_{\text{HG}}(\mu) = \sum_{l=0}^{\infty}(2l+1)\,g^l\,P_l(\mu)
+\end{equation}
+
+\begin{keyresult}{Coeficientes de Henyey--Greenstein}
+\begin{equation}
+    \boxed{\chi_l = (2l+1)\,g^l}
+\end{equation}
+Esto no es una aproximaci\'on: es una igualdad exacta para la serie infinita.
+En la pr\'actica se trunca en $L = N$ t\'erminos (el n\'umero de streams).
+\end{keyresult}
+
+\subsection{Recurrencia de los Polinomios de Legendre}
+
+Los $P_l(\mu)$ se eval\'uan mediante la recurrencia est\'andar:
+\begin{equation}
+    (l+1)\,P_{l+1}(x) = (2l+1)\,x\,P_l(x) - l\,P_{l-1}(x)
+\end{equation}
+con $P_0(x) = 1$ y $P_1(x) = x$.  Esta recurrencia es num\'ericamente estable
+hasta $l \sim 100$ y tiene complejidad $O(l)$ por punto.
+
+
+% ======================================================================
+\section{RTE Completa en Forma Integral}
+% ======================================================================
+
+Combinando la dispersi\'on difusa con la fuente del haz directo, y asumiendo
+simetr\'ia azimutal ($m=0$), la RTE completa es:
+
+\begin{equation}\label{eq:rte_full}
+    \boxed{\mu\,\frac{dI(\tau,\mu)}{d\tau} = I(\tau,\mu)
+    - \frac{\omega_0}{2}\int_{-1}^{1}P(\mu,\mu')\,I(\tau,\mu')\,d\mu'
+    - \frac{\omega_0 F_0}{4\pi}\,P(\mu,-\mu_0)\,e^{-\tau/\mu_0}}
+\end{equation}
+
+donde la funci\'on de fase como funci\'on de dos cosenos direccionales es:
+\begin{equation}\label{eq:phase_matrix_def}
+    P(\mu,\mu') = \sum_{l=0}^{N-1}\chi_l\,P_l(\mu)\,P_l(\mu')
+\end{equation}
+
+Aqu\'i $I$ se refiere solo a la componente difusa; el haz directo ya fue
+extra\'ido.
+
+% [Figura: Radiative balance at optical depth τ -- removida por brevedad]
+
+% ======================================================================
+\section{Discretizaci\'on: M\'etodo de Ordenadas Discretas}
+% ======================================================================
+
+\subsection{Cuadratura Double-Gauss}
+
+Reemplazamos la integral continua en $\mu'$ por una suma ponderada:
+\begin{equation}
+    \int_{-1}^{1}f(\mu')\,d\mu' \approx \sum_{j=1}^{N}w_j\,f(\mu_j)
+\end{equation}
+
+\textbf{Diferencia con DISORT cl\'asico:} Nuestro c\'odigo utiliza la cuadratura
+\textbf{Double-Gauss} (Sykes, 1951; Secci\'on~2.3 del reporte DISORT), en la que
+se aplica cuadratura de Gauss-Legendre \emph{por separado} a cada hemisferio
+$[0,1]$ y $[-1,0]$, en lugar de usar cuadratura Gauss-Legendre est\'andar sobre
+el intervalo completo $[-1,1]$.
+
+Esto implica que para $N$ streams ($N/2$ por hemisferio):
+\begin{itemize}
+    \item Se calculan $N/2$ nodos $\{\mu_j\}$ y pesos $\{w_j\}$ de GL en $[0,1]$.
+    \item Se construyen los $N/2$ nodos descendentes como $\mu_{-j} = -\mu_j$
+          con $w_{-j} = w_j$.
+\end{itemize}
+
+\begin{concept}{Ventaja del Double-Gauss sobre GL est\'andar}
+Como se\~nala el reporte DISORT (Secci\'on~2.3): en la cuadratura GL est\'andar
+para $[-1,1]$, los nodos se agrupan solo hacia $\mu = \pm 1$.  Con Double-Gauss,
+los nodos tambi\'en se agrupan hacia $\mu = 0$ (\'angulos rasantes), lo que da
+resultados superiores en las fronteras donde la intensidad puede ser discontinua
+en $\mu = 0$.  Otra ventaja es que los flujos hemisf\'ericos ascendente y
+descendente se obtienen directamente sin aproximaciones adicionales.
+\end{concept}
+
+\begin{concept}{N\'umero de streams $N$}
+Exactamente $N/2$ nodos son positivos (ascendentes) y $N/2$ negativos
+(descendentes).  Cada nodo se convierte en una direcci\'on discreta de
+propagaci\'on llamada \textbf{stream}.
+
+La precisi\'on de la cuadratura ($2N-1$) debe ser $\geq$ al orden de
+truncamiento de la expansi\'on de Legendre ($N$).  Esto se satisface
+autom\'aticamente ya que $2N-1 \geq N$ para todo $N \geq 1$.
+\end{concept}
+
+% [Figura: Discrete Ordinates & Phase Function -- removida por brevedad]
+
+\subsection{Sistema de EDOs Acopladas}
+
+Evaluando la RTE~\eqref{eq:rte_full} en cada nodo $\mu_i$ y reemplazando la
+integral por la cuadratura (Ec.~10a del reporte DISORT; nuestro c\'odigo
+trabaja con $m=0$ exclusivamente por la suposici\'on de simetr\'ia azimutal):
+
+\begin{equation}\label{eq:discrete_rte}
+    \mu_i\,\frac{dI_i(\tau)}{d\tau} = I_i
+    - \frac{\omega_0}{2}\sum_{j=1}^{N}w_j\,P_{ij}\,I_j
+    - Q_i\,e^{-\tau/\mu_0}
+\end{equation}
+
+donde $I_i(\tau) \equiv I(\tau,\mu_i)$, la \textbf{matriz de fase} es:
+\begin{equation}\label{eq:phase_matrix}
+    P_{ij} \equiv P(\mu_i,\mu_j) = \sum_{l=0}^{N-1}\chi_l\,P_l(\mu_i)\,P_l(\mu_j)
+\end{equation}
+y el \textbf{vector de fuente del haz} es:
+\begin{equation}\label{eq:beam_source}
+    Q_i = \frac{\omega_0 F_0}{4\pi}\,P(\mu_i,-\mu_0)
+    = \frac{\omega_0 F_0}{4\pi}\sum_{l=0}^{N-1}\chi_l\,P_l(\mu_i)\,P_l(-\mu_0)
+\end{equation}
+
+
+\subsection{Formulaci\'on Matricial}
+
+Definiendo $\mathbf{I} = [I_1,\ldots,I_N]^T$, el sistema~\eqref{eq:discrete_rte}
+se escribe en forma matricial como (forma general multi-stream, Ec.~15 del reporte;
+la Ec.~14e muestra la forma equivalente para el caso four-stream con matrices
+$\bm{\alpha}$ y $\bm{\beta}$):
+
+\begin{equation}\label{eq:matrix_ode}
+    \boxed{\frac{d\mathbf{I}}{d\tau} = \mathbf{A}\,\mathbf{I}
+    + \mathbf{S}\,e^{-\tau/\mu_0}}
+\end{equation}
+
+Las matrices involucradas son:
+\begin{align}
+    \mathbf{M} &= \text{diag}(\mu_1,\ldots,\mu_N)
+    &\text{(cosenos direccionales)}\label{eq:M_def}\\
+    \mathbf{W} &= \text{diag}(w_1,\ldots,w_N)
+    &\text{(pesos de cuadratura)}\label{eq:W_def}\\
+    \mathbf{P} &= [P_{ij}]_{N\times N}
+    &\text{(matriz de fase)}\label{eq:P_def}\\
+    \mathbf{A} &= \mathbf{M}^{-1}\!\left(\mathbf{I}_N
+    - \tfrac{\omega_0}{2}\,\mathbf{P}\,\mathbf{W}\right)
+    &\text{(matriz del sistema)}\label{eq:A_def}\\
+    \mathbf{S} &= -\mathbf{M}^{-1}\mathbf{Q}
+    &\text{(fuente del haz)}\label{eq:S_def}
+\end{align}
+
+\begin{physics}{Estructura de la Matriz $\mathbf{A}$}
+Cada fila $i$ de $\mathbf{A}$ divide por $\mu_i$, lo que amplifica las
+ecuaciones para direcciones rasantes ($|\mu_i|\ll 1$).  Esto refleja la
+f\'isica: un fot\'on con trayectoria casi horizontal recorre un camino
+\'optico mucho mayor por unidad de $\Delta\tau$ vertical.  Las filas
+correspondientes a $\mu_i > 0$ (ascendentes) y $\mu_i < 0$ (descendentes)
+producen eigenvalores de signos opuestos, reflejando la propagaci\'on
+en ambos sentidos.
+\end{physics}
+
+
+% ======================================================================
+\section{Soluci\'on por Autovalores}
+% ======================================================================
+
+\subsection{Soluci\'on Homog\'enea}
+
+La ecuaci\'on~\eqref{eq:matrix_ode} es una EDO lineal no homog\'enea vectorial.
+Su soluci\'on general tiene dos partes:
+
+\begin{equation}
+    \mathbf{I}(\tau) = \underbrace{\mathbf{I}_h(\tau)}_{\text{homog\'enea}}
+    + \underbrace{\mathbf{I}_p(\tau)}_{\text{particular}}
+\end{equation}
+
+La ecuaci\'on homog\'enea (sin forzamiento solar) es:
+\begin{equation}
+    \frac{d\mathbf{I}_h}{d\tau} = \mathbf{A}\,\mathbf{I}_h
+\end{equation}
+
+Buscamos soluciones de la forma $\mathbf{I}_h = \mathbf{v}\,e^{-\lambda\tau}$.
+Sustituyendo:
+\begin{equation}
+    -\lambda\,\mathbf{v}\,e^{-\lambda\tau} = \mathbf{A}\,\mathbf{v}\,e^{-\lambda\tau}
+    \quad\Longrightarrow\quad
+    \mathbf{A}\,\mathbf{v} = -\lambda\,\mathbf{v}
+\end{equation}
+
+Esto es la \textbf{ecuaci\'on de autovalores}: $-\lambda$ es un autovalor de
+$\mathbf{A}$ y $\mathbf{v}$ su autovector.  En el reporte DISORT, la Ec.~18
+presenta este resultado para el caso two-stream; la generalizaci\'on multi-stream
+se describe en las Ecs.~23a--f.
+
+Como $\mathbf{A}$ es $N\times N$, tiene $N$ autovalores $\{-\lambda_j\}$ y $N$
+autovectores $\{\mathbf{v}_j\}$.  Denotando la matriz de autovectores como
+$\mathbf{E} = [\mathbf{v}_1|\cdots|\mathbf{v}_N]$, donde $E_{ij}$ es la componente
+$i$ del autovector $j$:
+
+\begin{equation}\label{eq:homogeneous}
+    \mathbf{I}_h(\tau) = \sum_{j=1}^{N}C_j\,\mathbf{v}_j\,e^{-\lambda_j\tau}
+    \quad\Longleftrightarrow\quad
+    I_{h,i}(\tau) = \sum_{j=1}^{N}C_j\,E_{ij}\,e^{-\lambda_j\tau}
+\end{equation}
+
+\begin{physics}{Significado f\'isico de los autovalores y autovectores}
+\begin{itemize}
+    \item Cada par $(\lambda_j, \mathbf{v}_j)$ describe un \textbf{modo natural}
+          de transporte radiativo.
+    \item $\mathbf{v}_j$ es el \textbf{patr\'on angular}: c\'omo se distribuye
+          la intensidad entre los $N$ streams para ese modo.
+    \item $\lambda_j$ es la \textbf{tasa de decaimiento}: cu\'an r\'apido cambia
+          ese patr\'on con la profundidad \'optica.
+    \item $\text{Re}(\lambda_j) > 0$: modo que decae al penetrar
+          en la atm\'osfera (componente descendente que se aten\'ua).
+    \item $\text{Re}(\lambda_j) < 0$: modo que crece con $\tau$
+          (componente ascendente desde la superficie).
+    \item $C_j$ es la \textbf{amplitud} de cada modo, determinada por las
+          condiciones de frontera.
+\end{itemize}
+\end{physics}
+
+
+\subsection{Formulaci\'on Reducida de Autovalores (Ec.~23 del Reporte)}
+
+\textbf{Diferencia con la eigendescomposici\'on directa:} En lugar de resolver
+el problema de autovalores completo $N \times N$ de la matriz $\mathbf{A}$,
+nuestro c\'odigo implementa la \textbf{formulaci\'on reducida} de Stamnes y
+Swanson (1981), que reduce la dimensi\'on a $(N/2) \times (N/2)$, disminuyendo
+el costo computacional por un factor $\sim 8$.
+
+La clave es la estructura especial de $\mathbf{A}$: debido a la simetr\'ia
+$\mu_{-i} = -\mu_i$ y $w_{-i} = w_i$ (Ec.~14e del reporte), el sistema se
+separa en dos subsistemas acoplados para las intensidades ascendentes
+$\mathbf{I}^+$ y descendentes $\mathbf{I}^-$:
+\begin{equation}
+    \frac{d}{d\tau}\begin{bmatrix}\mathbf{I}^+\\\mathbf{I}^-\end{bmatrix}
+    = \begin{bmatrix}-\bm{\alpha} & \bm{\beta}\\
+    -\bm{\beta} & \bm{\alpha}\end{bmatrix}
+    \begin{bmatrix}\mathbf{I}^+\\\mathbf{I}^-\end{bmatrix}
+    - \begin{bmatrix}\mathbf{Q}'^+\\\mathbf{Q}'^-\end{bmatrix}
+\end{equation}
+
+Buscando soluciones homog\'eneas $\mathbf{I}^\pm = \mathbf{G}^\pm e^{-k\tau}$,
+se llega a (Ec.~23c--f del reporte):
+\begin{align}
+    (\bm{\alpha} - \bm{\beta})(\bm{\alpha} + \bm{\beta})\,\mathbf{v} &= k^2\,\mathbf{v}
+    \label{eq:reduced_eigen}
+\end{align}
+
+donde $\mathbf{v} = \mathbf{G}^+ + \mathbf{G}^-$.  Este es un problema de
+autovalores $(N/2) \times (N/2)$ cuyas soluciones $k_j^2$ son \textbf{reales y
+positivas} (Stamnes y Swanson, 1981), por lo que $k_j = \sqrt{k_j^2}$ son
+reales.  Los autovectores se recuperan como:
+\begin{align}
+    \mathbf{G}_j^+ &= \tfrac{1}{2}\left(\mathbf{v}_j + (\bm{\alpha}+\bm{\beta})\,\mathbf{v}_j / k_j\right)\\
+    \mathbf{G}_j^- &= \tfrac{1}{2}\left(\mathbf{v}_j - (\bm{\alpha}+\bm{\beta})\,\mathbf{v}_j / k_j\right)
+\end{align}
+
+\begin{keyresult}{Ventajas de la formulaci\'on reducida}
+\begin{itemize}
+    \item \textbf{Autovalores garantizados reales}: No se requiere manejo de
+          n\'umeros complejos (todos los arrays son \texttt{float64}).
+    \item \textbf{Autovalores en pares $\pm k_j$}: Cada $k_j > 0$ genera
+          autom\'aticamente el modo $-k_j$, dando los $N$ modos totales.
+    \item \textbf{Reducci\'on $8\times$ en costo}: La eigendescomposici\'on escala
+          como $O(n^3)$; pasar de $N$ a $N/2$ da $(N/2)^3 / N^3 = 1/8$.
+\end{itemize}
+\end{keyresult}
+
+
+\subsection{Soluci\'on Particular}
+
+Para el t\'ermino forzante $\mathbf{S}\,e^{-\tau/\mu_0}$, proponemos una
+soluci\'on particular de la misma forma (Ec.~24a del reporte):
+\begin{equation}
+    \mathbf{I}_p(\tau) = \mathbf{Z}_p\,e^{-\tau/\mu_0}
+\end{equation}
+
+Sustituyendo en~\eqref{eq:matrix_ode}:
+\begin{equation}
+    -\frac{1}{\mu_0}\,\mathbf{Z}_p\,e^{-\tau/\mu_0}
+    = \mathbf{A}\,\mathbf{Z}_p\,e^{-\tau/\mu_0}
+    + \mathbf{S}\,e^{-\tau/\mu_0}
+\end{equation}
+
+Dividiendo por $e^{-\tau/\mu_0}$ y reorganizando:
+\begin{equation}\label{eq:particular}
+    \boxed{\left(\mathbf{A} + \frac{1}{\mu_0}\,\mathbf{I}_N\right)\mathbf{Z}_p
+    = -\mathbf{S}}
+\end{equation}
+
+Este es un sistema lineal $N\times N$ que se resuelve directamente (Ec.~24b
+del reporte).
+
+\begin{physics}{Condici\'on de resonancia}
+Si $1/\mu_0$ coincide exactamente con un autovalor de $-\mathbf{A}$, la matriz
+es singular.  Esto corresponde a una resonancia entre el forzamiento solar y
+un modo natural.  Con $N = 16$ streams esto es extremadamente improbable.
+\end{physics}
+
+\begin{concept}{Caso especial $\omega_0 = 1$ (dispersi\'on conservativa)}
+Cuando $\omega_0 = 1$, el eigenvalor $k = 0$ aparece (Ec.~18b del reporte),
+lo que produce singularidades en la formulaci\'on de autovalores.  Nuestro
+c\'odigo sigue el enfoque de CDISORT: se fija
+$\omega_0 = 1 - 10^{-12}$ para evitar la singularidad, lo que introduce un
+error despreciable ($< 10^{-10}$) en la soluci\'on.
+\end{concept}
+
+
+\subsection{Soluci\'on General por Capa}
+
+La soluci\'on completa en una capa con propiedades $(\omega_0, g, \Delta\tau)$ es
+(Ec.~27a del reporte):
+
+\begin{equation}\label{eq:general_sol}
+    \boxed{I_i(\tau) = \sum_{j=1}^{N}C_j\,E_{ij}\,e^{-\lambda_j\tau}
+    + Z_{p,i}\,e^{-\tau/\mu_0}}
+\end{equation}
+
+Cada capa tiene sus propios $\mathbf{A}$, eigenvalores, eigenvectores y
+$\mathbf{Z}_p$.  Las $N$ constantes $C_j$ por capa se determinan por las
+condiciones de frontera.
+
+% [Figura: DISORT Eigenvalue Solution in a Layer -- removida por brevedad]
+
+% ======================================================================
+\section{Extensi\'on Multicapa}
+% ======================================================================
+
+\subsection{Perfil Atmosf\'erico de $K$ Capas}
+
+La atm\'osfera se divide en $K$ capas (Figura~1 del reporte DISORT), cada una
+con propiedades \'opticas independientes $(\Delta\tau_k, \omega_{0,k}, g_k)$.
+Las profundidades \'opticas acumuladas en las interfaces son:
+\begin{equation}
+    \hat{\tau}_0 = 0,\quad
+    \hat{\tau}_p = \sum_{k=1}^{p}\Delta\tau_k,\quad
+    \hat{\tau}_K = \tau_{\text{total}}
+\end{equation}
+
+\subsection{Soluci\'on por Capa con Coordenadas Locales}
+
+En cada capa $k$, se construye su propia matriz $\mathbf{A}_k$ y se
+descompone en autovalores:
+\begin{align}
+    \mathbf{A}_k &= \mathbf{M}^{-1}\!\left(\mathbf{I}_N
+    - \tfrac{\omega_{0,k}}{2}\,\mathbf{P}_k\,\mathbf{W}\right)\\
+    \mathbf{A}_k\,\mathbf{E}_k &= \mathbf{E}_k\,\bm{\Lambda}_k
+    \quad\text{(descomposici\'on espectral)}\\
+    \left(\mathbf{A}_k + \mu_0^{-1}\mathbf{I}_N\right)\mathbf{Z}_{p,k} &= -\mathbf{S}_k
+\end{align}
+
+La soluci\'on en la capa $k$ se expresa en coordenadas \emph{locales}
+$\tau' \in [0, \Delta\tau_k]$ (donde $\tau' = \tau - \hat{\tau}_{k-1}$):
+
+\begin{equation}\label{eq:layer_solution}
+    I_i^{(k)}(\tau') = \sum_{j=1}^{N}C_{k,j}\,E^{(k)}_{ij}\,e^{-\lambda^{(k)}_j\tau'}
+    + Z_{p,i}^{(k)}\,e^{-(\hat{\tau}_{k-1}+\tau')/\mu_0}
+\end{equation}
+
+El sistema tiene $N \times K$ constantes de integraci\'on desconocidas en total.
+
+
+% ======================================================================
+\section{Condiciones de Frontera y Acoplamiento}
+% ======================================================================
+
+Las $NK$ constantes se determinan con $NK$ ecuaciones de frontera
+(Ecs.~46a--c del reporte):
+
+\subsection{TOA ($\tau=0$): Intensidad Descendente Nula}
+
+No entra radiaci\'on difusa desde el espacio.  Para cada stream descendente
+$\mu_i < 0$ ($N/2$ ecuaciones, Ec.~46a del reporte):
+
+\begin{equation}\label{eq:bc_toa}
+    I_i^{(1)}(0) = 0 \quad\Longrightarrow\quad
+    \sum_{j=1}^{N}C_{1,j}\,E^{(1)}_{ij}\,\underbrace{e^{-\lambda^{(1)}_j\cdot 0}}_{\text{exp estabilizado}}
+    = -Z_{p,i}^{(1)}
+\end{equation}
+
+\subsection{Continuidad en Interfaces ($\hat{\tau}_p$)}
+
+En cada interfaz entre capas $k$ y $k+1$, la intensidad debe ser continua
+para \emph{todos} los $N$ streams ($N$ ecuaciones por interfaz,
+$N(K-1)$ en total, Ec.~46b del reporte):
+
+\begin{equation}\label{eq:bc_interface}
+    I_i^{(k)}(\Delta\tau_k) = I_i^{(k+1)}(0) \qquad \forall\,i=1,\ldots,N
+\end{equation}
+
+Expandiendo ambos lados con la Ec.~\eqref{eq:layer_solution}:
+\begin{multline}\label{eq:bc_interface_expanded}
+    \sum_j C_{k,j}\,E^{(k)}_{ij}\,e^{-\lambda^{(k)}_j\Delta\tau_k}
+    + Z_{p,i}^{(k)}\,e^{-\hat{\tau}_p/\mu_0} \\
+    = \sum_j C_{k+1,j}\,E^{(k+1)}_{ij}\,e^{-\lambda^{(k+1)}_j\cdot 0}
+    + Z_{p,i}^{(k+1)}\,e^{-\hat{\tau}_p/\mu_0}
+\end{multline}
+
+\subsection{BOA ($\tau=\tau_{\text{total}}$): Reflexi\'on Lambertiana}
+
+La superficie refleja con albedo $A_s$.  Para cada stream ascendente
+$\mu_i > 0$ ($N/2$ ecuaciones, Ec.~46c del reporte):
+
+\begin{equation}\label{eq:bc_boa}
+    I_i^{(K)}(\Delta\tau_K) = \frac{A_s}{\pi}\,F_{\downarrow}(\tau_{\text{total}})
+\end{equation}
+
+El flujo descendente total tiene dos componentes:
+\begin{equation}\label{eq:flux_down}
+    F_{\downarrow} = \underbrace{2\pi\sum_{j:\mu_j<0}w_j|\mu_j|\,I_j^{(K)}(\Delta\tau_K)}_{F_{\text{diff}}\text{ (difuso)}}
+    + \underbrace{\mu_0\,F_0\,e^{-\tau_{\text{total}}/\mu_0}}_{F_{\text{dir}}\text{ (directo)}}
+\end{equation}
+
+\begin{physics}{Superficie Lambertiana}
+Un reflector Lambertiano dispersa la luz incidente uniformemente en todas las
+direcciones del hemisferio superior.  El factor $1/\pi$ asegura conservaci\'on
+de energ\'ia: $\int_0^{2\pi}\int_0^1 (A_s/\pi)F_{\downarrow}\,\mu\,d\mu\,d\phi
+= A_s\,F_{\downarrow}$.
+\end{physics}
+
+\subsection{Sistema Global de Frontera}
+
+El conteo de ecuaciones:
+\begin{itemize}
+    \item TOA: $N/2$ ecuaciones
+    \item $(K-1)$ interfaces: $N(K-1)$ ecuaciones
+    \item BOA: $N/2$ ecuaciones
+    \item \textbf{Total}: $N/2 + N(K-1) + N/2 = NK$ ecuaciones = $NK$ inc\'ognitas $\checkmark$
+\end{itemize}
+
+Se ensambla un sistema lineal global:
+\begin{equation}\label{eq:global_system}
+    \mathbf{B}\,\mathbf{c} = \mathbf{b}
+\end{equation}
+
+donde $\mathbf{c} = [C_{1,1},\ldots,C_{1,N},\,C_{2,1},\ldots,C_{K,N}]^T$ es el
+vector de $NK$ constantes de integraci\'on.
+
+% [Figura: Multi-Layer Boundary Conditions -- removida por brevedad]
+
+% ======================================================================
+\section{Transformaci\'on de Escala (Estabilizaci\'on Num\'erica)}\label{sec:scaling}
+% ======================================================================
+
+\subsection{El Problema del Desbordamiento}
+
+La Ec.~\eqref{eq:layer_solution} contiene t\'erminos $e^{-\lambda_j\tau'}$.
+Cuando $\text{Re}(\lambda_j) < 0$, el argumento del exponencial se vuelve
+\emph{positivo} y la exponencial crece sin l\'imite para $\tau'$ grande.
+Esto produce \texttt{NaN} e \texttt{Inf} en la soluci\'on num\'erica.
+
+Como se\~nalan Stamnes y Conklin (1984) y la Secci\'on~2.10 del reporte DISORT,
+este mal condicionamiento se elimina completamente mediante una
+\textbf{transformaci\'on de escala}.
+
+\subsection{Principio de la Transformaci\'on}
+
+La idea clave (Ec.~48 del reporte) es cambiar las variables de integraci\'on
+$C_j$ por variables escaladas $\hat{C}_j$ que absorben las exponenciales
+peligrosas:
+
+\begin{itemize}
+    \item Para eigenvalores con $\text{Re}(\lambda_j) \geq 0$ (decaen desde el
+          tope): se usa el \textbf{tope de la capa} como punto de referencia.
+          $\hat{C}_j = C_j$ y el factor exponencial a evaluar es
+          $e^{-\lambda_j\tau'}$, que siempre tiene argumento $\leq 0$ para
+          $\tau' \geq 0$.
+
+    \item Para eigenvalores con $\text{Re}(\lambda_j) < 0$ (decaen desde el fondo):
+          se usa el \textbf{fondo de la capa} como punto de referencia.
+          Se define $\hat{C}_j = C_j\,e^{-\lambda_j\Delta\tau}$ y el factor
+          exponencial se reescribe como:
+          \begin{equation}
+              e^{-\lambda_j\tau'} = e^{-\lambda_j(\tau'-\Delta\tau)}
+              \cdot e^{-\lambda_j\Delta\tau}
+          \end{equation}
+          El t\'ermino $e^{-\lambda_j(\tau'-\Delta\tau)}$ tiene argumento
+          $= -\lambda_j(\tau'-\Delta\tau) = |\lambda_j|(\Delta\tau - \tau') \geq 0$
+          (ya que $\lambda_j < 0$ y $\tau' \leq \Delta\tau$), por lo tanto
+          \emph{siempre decae}.
+\end{itemize}
+
+\begin{keyresult}{Factor exponencial estabilizado}
+El factor exponencial estabilizado en cualquier punto local $\tau'$ dentro de
+una capa de espesor $\Delta\tau$ es:
+\begin{equation}\label{eq:stable_exp}
+    \boxed{f_j(\tau') = \begin{cases}
+        e^{-\lambda_j\tau'} & \text{si } \text{Re}(\lambda_j) \geq 0
+        \quad\text{(ref.\ al tope)}\\[4pt]
+        e^{-\lambda_j(\tau'-\Delta\tau)} & \text{si } \text{Re}(\lambda_j) < 0
+        \quad\text{(ref.\ al fondo)}
+    \end{cases}}
+\end{equation}
+En ambos casos, el argumento del exponencial es $\leq 0$, eliminando todo
+riesgo de desbordamiento.
+\end{keyresult}
+
+\subsection{Verificaci\'on en los L\'imites}
+
+\begin{itemize}
+    \item \textbf{Tope de la capa} ($\tau'=0$):
+    \begin{itemize}
+        \item $\lambda_j \geq 0$: $f_j(0) = e^0 = 1$ \checkmark
+        \item $\lambda_j < 0$: $f_j(0) = e^{-\lambda_j(-\Delta\tau)} = e^{|\lambda_j|\Delta\tau \cdot (-1)} = e^{\lambda_j\Delta\tau}$. Como $\lambda_j < 0$, el argumento es negativo \checkmark
+    \end{itemize}
+    \item \textbf{Fondo de la capa} ($\tau'=\Delta\tau$):
+    \begin{itemize}
+        \item $\lambda_j \geq 0$: $f_j(\Delta\tau) = e^{-\lambda_j\Delta\tau}$. Argumento $\leq 0$ \checkmark
+        \item $\lambda_j < 0$: $f_j(\Delta\tau) = e^0 = 1$ \checkmark
+    \end{itemize}
+\end{itemize}
+
+En el l\'imite $|\lambda_j|\Delta\tau \to \infty$ (capa \'opticamente gruesa),
+la matrix del sistema se reduce a una forma diagonal por bloques, eliminando
+completamente el mal condicionamiento (como se demuestra en la Secci\'on~2.10.2
+del reporte para el caso two-stream).
+
+
+% ======================================================================
+\section{Delta-M Scaling}\label{sec:deltam}
+% ======================================================================
+
+\subsection{El Problema del Pico Frontal}
+
+Para aerosoles con $g > 0.5$, la funci\'on de fase tiene un pico agudo en la
+direcci\'on frontal ($\Theta \approx 0$).  Representar este pico con una serie
+finita de Legendre truncada en $N$ t\'erminos produce oscilaciones artificiales
+(efecto Gibbs) que degradan la precisi\'on.
+
+\subsection{M\'etodo $\delta$-M (Wiscombe, 1977)}
+
+El m\'etodo $\delta$-M (Wiscombe, 1977; Secci\'on~3.2.2 del reporte DISORT,
+Ecs.~54a--c) separa la funci\'on de fase en una delta de Dirac frontal
+m\'as un residuo suave:
+
+\begin{equation}
+    P(\cos\Theta) \approx 2f\,\delta(1-\cos\Theta) + (1-f)\,P'(\cos\Theta)
+\end{equation}
+
+donde $f$ es la fracci\'on de energ\'ia en el pico frontal.  Para la
+expansi\'on truncada en $2M$ t\'erminos:
+\begin{equation}
+    f = g_{2M} \approx g^{2M}
+\end{equation}
+
+Las propiedades \'opticas escaladas son:
+\begin{equation}\label{eq:delta_m_scaling}
+    \boxed{
+    \begin{aligned}
+        \tau' &= \tau\,(1 - \omega_0 f) \\
+        \omega_0' &= \frac{\omega_0(1-f)}{1-\omega_0 f} \\
+        g' &= \frac{g - f}{1 - f}
+    \end{aligned}
+    }
+\end{equation}
+
+Los coeficientes de Legendre escalados son (Ec.~54b del reporte):
+\begin{equation}
+    \chi_l' = \frac{\chi_l - f(2l+1)}{1 - f} \qquad l = 0,\ldots,2M-1
+\end{equation}
+
+\begin{physics}{Efecto del Delta-M Scaling}
+\begin{itemize}
+    \item \textbf{Reduce $\tau$}: la extinci\'on efectiva disminuye porque la
+          fracci\'on frontal ``no cuenta'' como dispersi\'on real (la luz sigue
+          esencialmente en la misma direcci\'on).
+    \item \textbf{Reduce $g$}: la funci\'on de fase residual es m\'as sim\'etrica,
+          m\'as f\'acil de representar con pocos t\'erminos.
+    \item \textbf{Permite usar pocos streams}: con delta-M, $N=16$ streams da
+          resultados comparables a $N=64$ sin delta-M para funciones de fase
+          con $g > 0.7$.
+\end{itemize}
+\end{physics}
+
+% [Figura: Delta-M Scaling -- removida por brevedad]
+
+% ======================================================================
+\section{Extracci\'on de Radiancias}
+% ======================================================================
+
+\subsection{Radiancias TOA Upwelling (Observable del Sat\'elite)}
+
+Una vez resuelto el sistema global~\eqref{eq:global_system} y obtenidas las
+constantes $\hat{C}_{k,j}$, evaluamos la intensidad ascendente en $\tau=0$
+(tope de la capa 1, $\tau'=0$).  Para cada stream ascendente $\mu_i > 0$:
+
+\begin{equation}\label{eq:I_toa}
+    \boxed{I_i^{\text{TOA}} = I_i^{(1)}(\tau'=0)
+    = \sum_{j=1}^{N}\hat{C}_{1,j}\,E^{(1)}_{ij}\,f_j(0)
+    + Z_{p,i}^{(1)}}
+\end{equation}
+
+donde $f_j(0)$ es el factor exponencial estabilizado de la
+Ec.~\eqref{eq:stable_exp} evaluado en $\tau'=0$, y el t\'ermino de beam
+contribuye con $e^{-0/\mu_0} = 1$.
+
+Esto produce un vector de $N/2$ radiancias en diferentes \'angulos de visi\'on,
+que constituye el \textbf{observable} del modelo directo: $\mathbf{y} = F(\mathbf{x})$.
+
+\subsection{Radiancias BOA Downwelling}
+
+De forma an\'aloga, evaluamos en el fondo de la \'ultima capa
+($\tau'=\Delta\tau_K$) para streams descendentes $\mu_i < 0$:
+
+\begin{equation}
+    I_i^{\text{BOA}} = I_i^{(K)}(\Delta\tau_K)
+    = \sum_{j=1}^{N}\hat{C}_{K,j}\,E^{(K)}_{ij}\,f_j(\Delta\tau_K)
+    + Z_{p,i}^{(K)}\,e^{-\tau_{\text{total}}/\mu_0}
+\end{equation}
+
+
+% ======================================================================
+\section{Intensidades en \'Angulos Arbitrarios (Ecs.~35a,b del Reporte)}
+\label{sec:interpolation}
+% ======================================================================
+
+Las radiancias obtenidas por el m\'etodo de ordenadas discretas est\'an
+disponibles \'unicamente en los $N$ nodos de cuadratura $\{\mu_i\}$.  Para
+obtener intensidades en \'angulos \textbf{arbitrarios} $\mu \neq \mu_i$, DISORT
+utiliza la \textbf{integraci\'on de la funci\'on fuente} (Stamnes, 1982a;
+Secci\'on~2.7--2.8 del reporte).
+
+\subsection{Principio: Integraci\'on Formal de la RTE}
+
+La RTE~\eqref{eq:rte_tau} se puede resolver formalmente para cualquier $\mu > 0$
+(ascendente) y $\mu < 0$ (descendente) en un medio de espesor $\tau_L$
+(Ec.~28a,b del reporte):
+\begin{align}
+    I^+(\tau,\mu) &= I^+(\tau_L,\mu)\,e^{-(\tau_L-\tau)/\mu}
+    + \int_{\tau}^{\tau_L} S(t,+\mu)\,\frac{e^{-(t-\tau)/\mu}}{\mu}\,dt
+    \label{eq:formal_up}\\
+    I^-(\tau,\mu) &= I^-(0,\mu)\,e^{-\tau/\mu}
+    + \int_{0}^{\tau} S(t,-\mu)\,\frac{e^{-(\tau-t)/\mu}}{\mu}\,dt
+    \label{eq:formal_dn}
+\end{align}
+
+La funci\'on fuente $S(\tau,\mu)$ se conoce anal\'iticamente a partir de la
+soluci\'on discreta (Ec.~30 del reporte):
+\begin{equation}\label{eq:source_interp}
+    S(\tau,\mu) = \sum_{j=-N}^{N} C_j\,\overline{G}_j(\mu)\,e^{-k_j\tau}
+    + \delta_{m0}\left[V_0(\mu) + V_1(\mu)\,\tau\right]
+\end{equation}
+
+donde $\overline{G}_j(\mu)$ se calcula interpolando los eigenvectores usando la
+cuadratura (Ec.~31a,b del reporte):
+\begin{equation}
+    \overline{G}_j(\mu) = \sum_{i=-N,\neq 0}^{N} w_i\,D^m(\mu,\mu_i)\,G_j(\mu_i)
+\end{equation}
+
+\subsection{Resultado: Ecs.~35a,b del Reporte}
+
+Sustituyendo~\eqref{eq:source_interp} en~\eqref{eq:formal_up}
+y~\eqref{eq:formal_dn} e integrando las exponenciales anal\'iticamente capa por
+capa (Secci\'on~2.8.2 del reporte), se obtienen las expresiones cerradas para
+intensidades en m\'ultiples capas (Ecs.~35a,b).  Para el caso simplificado de
+nuestro c\'odigo ($m=0$, sin fuente t\'ermica), la intensidad TOA ascendente
+en un \'angulo arbitrario $\mu > 0$ es:
+\begin{equation}\label{eq:interp_toa}
+    \boxed{I^{\text{TOA}}(\mu) = \sum_{n=1}^{K}\sum_{j=1}^{N}
+    C_{jn}\,\frac{\overline{G}_{jn}(\mu)}{1+k_{jn}\mu}\,
+    \left(E^+_{jn} - E^+_{jn,\text{next}}\right)
+    + \text{t\'erminos de beam}}
+\end{equation}
+
+donde los factores $E^+_{jn}$ contienen las exponenciales estabilizadas
+que aseguran convergencia num\'erica (Ec.~36 del reporte).
+
+\begin{physics}{Interpolaci\'on vs.\ Radiancias Discretas}
+\begin{itemize}
+    \item Las radiancias en nodos de cuadratura ($\mu = \mu_i$) son exactas
+          al orden de la cuadratura.
+    \item Las radiancias interpoladas con Ecs.~35a,b reproducen los valores
+          exactos en los nodos de cuadratura (Stamnes, 1982a, hallazgo 1).
+    \item Para \'angulos intermedios, las Ecs.~35a,b proporcionan una
+          ``correcci\'on inteligente'' que satisface las condiciones de frontera
+          y continuidad para \emph{todos} los \'angulos $\mu$ (hallazgo 3).
+    \item Nuestro c\'odigo eval\'ua las intensidades en una malla fina de $1°$
+          a $89°$ (89 \'angulos) para generar gr\'aficos de campo de radiancia
+          continuo, en lugar de los $N/2$ puntos discretos de cuadratura.
+\end{itemize}
+\end{physics}
+
+\subsection{Uso en la Inversi\'on}
+
+La clase \texttt{InverseOptimizer} acepta un par\'ametro opcional
+\texttt{user\_mus} (cosenos de \'angulos de visi\'on definidos por el usuario).
+Cuando se proporciona, el modelo directo $F(\mathbf{x})$ utiliza la
+interpolaci\'on de Ecs.~35a,b en lugar de devolver las intensidades en los
+nodos de cuadratura:
+\begin{equation}
+    F(\mathbf{x}) = \begin{cases}
+        [I(\mu_1), \ldots, I(\mu_{N/2})]^T & \text{sin \texttt{user\_mus}}\\
+        [I(\mu_1^u), \ldots, I(\mu_M^u)]^T & \text{con \texttt{user\_mus}}
+    \end{cases}
+\end{equation}
+
+Esto permite ajustar el modelo a observaciones en \'angulos que no coinciden
+con los nodos de cuadratura, como ocurrir\'ia con datos reales de sat\'elite.
+
+
+% ======================================================================
+\part{Modelo Atmosf\'erico Realista}
+% ======================================================================
+
+% ======================================================================
+\section{Atm\'osfera Est\'andar US-1976}\label{sec:us76}
+% ======================================================================
+
+Para el Nivel~2, se construye una atm\'osfera realista de 20 capas basada en la
+US Standard Atmosphere 1976.
+
+\subsection{Estructura Vertical}
+
+21 fronteras de capa (20 capas), m\'as densas cerca de la superficie donde
+se concentran los aerosoles:
+\begin{equation}
+    z = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 50, 60, 70, 85, 100]\;\text{km}
+\end{equation}
+
+\subsection{Perfil de Temperatura}
+
+La temperatura sigue segmentos lineales (\emph{lapse rates}):
+\begin{center}
+\begin{tabular}{llr}
+\toprule
+\textbf{Regi\'on} & \textbf{Altitud} & \textbf{$L$ (K/km)} \\ \midrule
+Troposfera      & 0--11 km   & $-6.5$ \\
+Tropopausa      & 11--20 km  & $0$ \\
+Estratosfera    & 20--32 km  & $+1.0$ \\
+                & 32--47 km  & $+2.8$ \\
+Estratopausa    & 47--51 km  & $0$ \\
+Mesosfera       & 51--71 km  & $-2.8$ \\
+                & 71--100 km & $-2.0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Presi\'on: Ecuaci\'on Hidrost\'atica}
+
+\begin{equation}
+    P(z) = \begin{cases}
+        P(z_0)\left(\dfrac{T(z)}{T(z_0)}\right)^{-g_0 M_{\text{air}}/(R\,L)}
+        & L \neq 0 \\[8pt]
+        P(z_0)\exp\!\left(-\dfrac{g_0 M_{\text{air}}(z-z_0)}{R\,T(z_0)}\right)
+        & L = 0
+    \end{cases}
+\end{equation}
+
+con $g_0 = 9.80665$~m/s$^2$, $M_{\text{air}} = 0.0289644$~kg/mol,
+$R = 8.31447$~J/(mol$\cdot$K).
+
+\subsection{Densidad Num\'erica}
+
+\begin{equation}
+    n_{\text{air}} = \frac{P}{k_B\,T} \qquad\text{[m}^{-3}\text{]}
+\end{equation}
+
+% [Figura: 20-Layer Atmosphere Profile -- removida por brevedad]
+
+% ======================================================================
+\section{Dispersi\'on de Rayleigh}\label{sec:rayleigh}
+% ======================================================================
+
+\subsection{Secci\'on Eficaz de Rayleigh}
+
+La secci\'on eficaz de dispersi\'on Rayleigh por mol\'ecula
+(Bodhaine et al., 1999):
+\begin{equation}
+    \sigma_{\text{Ray}} = \frac{4.02\times 10^{-28}}{\lambda_{\mu\text{m}}^{4.04}}
+    \quad\text{[cm}^2\text{]}
+\end{equation}
+
+\subsection{Espesor \'Optico de Rayleigh por Capa}
+
+\begin{equation}
+    \tau_{\text{Ray},k} = \sigma_{\text{Ray}} \cdot \bar{n}_{\text{air},k}
+    \cdot \Delta z_k
+\end{equation}
+
+donde $\bar{n}_{\text{air},k}$ es la densidad num\'erica media en la capa $k$
+y $\Delta z_k$ es el espesor geom\'etrico.
+
+\subsection{Funci\'on de Fase de Rayleigh}
+
+\begin{equation}
+    P_{\text{Ray}}(\cos\Theta) = \frac{3}{4}(1 + \cos^2\Theta)
+\end{equation}
+
+En Legendre: $\chi_0 = 1$, $\chi_2 = 0.5$, todos los dem\'as $= 0$.
+Es decir, $g_{\text{Ray}} = 0$ (dispersi\'on sim\'etrica).
+
+\subsection{Distribuci\'on Vertical del Aerosol}\label{sec:aer_vertical}
+
+El AOD total de la columna ($\tau_{\text{aer,total}}$) se distribuye
+verticalmente seg\'un un \textbf{perfil exponencial decreciente} con una
+altura de escala $H_{\text{aer}}$ (en nuestro c\'odigo, $H_{\text{aer}} = 2.0$~km):
+\begin{equation}\label{eq:aer_profile}
+    \tau_{\text{aer},k} = \tau_{\text{aer,total}} \cdot
+    \frac{e^{-z_{\text{mid},k} / H_{\text{aer}}}}
+    {\sum_{j=1}^{K} e^{-z_{\text{mid},j} / H_{\text{aer}}}}
+\end{equation}
+
+donde $z_{\text{mid},k}$ es la altitud media de la capa $k$
+(promedio de sus fronteras superior e inferior).  Este perfil concentra la
+mayor\'ia del aerosol en las primeras capas:
+\begin{itemize}
+    \item A $z = 0$~km: peso m\'aximo $\propto 1$.
+    \item A $z = H_{\text{aer}} = 2$~km: peso $\propto e^{-1} \approx 0.37$.
+    \item A $z = 5$~km: peso $\propto e^{-2.5} \approx 0.08$.
+    \item Por encima de 10~km: contribuci\'on despreciable ($< 1\%$).
+\end{itemize}
+
+\subsection{Propiedades Combinadas Rayleigh + Aerosol}
+
+Para cada capa $k$, las propiedades \'opticas totales se obtienen combinando
+las contribuciones de Rayleigh (molecular) y aerosol.  La dispersi\'on de
+Rayleigh es puramente conservativa ($\omega_{\text{Ray}} = 1$) e isotr\'opica
+($g_{\text{Ray}} = 0$):
+
+\begin{align}
+    \tau_{\text{total},k} &= \tau_{\text{aer},k} + \tau_{\text{Ray},k}
+    \label{eq:tau_combined}\\
+    \omega_{0,k} &= \frac{\tau_{\text{aer},k}\,\omega_{\text{aer}}
+    + \tau_{\text{Ray},k}\cdot 1}{\tau_{\text{total},k}}
+    \label{eq:ssa_combined}\\
+    g_{\text{eff},k} &= \frac{\tau_{\text{aer},k}\,\omega_{\text{aer}}\,g_{\text{aer}}
+    + \tau_{\text{Ray},k}\cdot 1 \cdot 0}
+    {\tau_{\text{aer},k}\,\omega_{\text{aer}} + \tau_{\text{Ray},k}}
+    \label{eq:g_combined}
+\end{align}
+
+\begin{physics}{Significado de las f\'ormulas de combinaci\'on}
+\begin{itemize}
+    \item \textbf{Ec.~\eqref{eq:tau_combined}}: El espesor \'optico total es
+          aditivo (extinciones se suman).
+    \item \textbf{Ec.~\eqref{eq:ssa_combined}}: El SSA combinado pondera por
+          el espesor \'optico de cada componente.  En capas altas donde domina
+          Rayleigh ($\tau_{\text{Ray}} \gg \tau_{\text{aer}}$),
+          $\omega_{0,k} \to 1$ (dispersi\'on pura).  En capas bajas con mucho
+          aerosol, $\omega_{0,k} \to \omega_{\text{aer}}$ (contribuci\'on de
+          absorci\'on del aerosol).
+    \item \textbf{Ec.~\eqref{eq:g_combined}}: El par\'ametro de asimetr\'ia
+          efectivo pondera por el \emph{espesor \'optico de dispersi\'on}
+          ($\tau \cdot \omega$) de cada componente.  Solo la dispersi\'on
+          del aerosol contribuye asimetr\'ia ($g > 0$); Rayleigh aporta
+          dispersi\'on sim\'etrica ($g = 0$).
+    \item El SSA combinado se acota: $\omega_{0,k} \in (0, 1-10^{-12}]$ para
+          evitar la singularidad de dispersi\'on conservativa.
+\end{itemize}
+\end{physics}
+
+
+% ======================================================================
+\section{Teor\'ia de Mie para Propiedades del Aerosol}\label{sec:mie}
+% ======================================================================
+
+\subsection{Eficiencias de Mie}
+
+Para una esfera de radio $r$ con \'indice de refracci\'on complejo
+$m = n_r + in_i$, el par\'ametro de tama\~no es:
+\begin{equation}
+    x = \frac{2\pi r}{\lambda}
+\end{equation}
+
+Las eficiencias de extinci\'on y dispersi\'on se calculan mediante las series
+de Mie (Bohren \& Huffman, 1983):
+\begin{align}
+    Q_{\text{ext}} &= \frac{2}{x^2}\sum_{n=1}^{n_{\max}}(2n+1)\,\text{Re}(a_n + b_n)\\
+    Q_{\text{sca}} &= \frac{2}{x^2}\sum_{n=1}^{n_{\max}}(2n+1)(|a_n|^2 + |b_n|^2)
+\end{align}
+
+donde $a_n$ y $b_n$ son los coeficientes de Mie (Bohren \& Huffman, 1983,
+Cap.~4):
+\begin{align}\label{eq:mie_an_bn}
+    a_n &= \frac{\bigl[D_n(mx)/m + n/x\bigr]\,\psi_n(x) - \psi_{n-1}(x)}
+               {\bigl[D_n(mx)/m + n/x\bigr]\,\xi_n(x)  - \xi_{n-1}(x)}\\[6pt]
+    b_n &= \frac{\bigl[D_n(mx)\cdot m + n/x\bigr]\,\psi_n(x) - \psi_{n-1}(x)}
+               {\bigl[D_n(mx)\cdot m + n/x\bigr]\,\xi_n(x)  - \xi_{n-1}(x)}
+\end{align}
+
+Aqu\'i:
+\begin{itemize}
+    \item $m = n_r + i\,n_i$ es el \'indice de refracci\'on complejo del
+          aerosol relativo al medio circundante.
+    \item $D_n(z) = \frac{d}{dz}\ln\psi_n(z) = \frac{\psi_n'(z)}{\psi_n(z)}$
+          es la \textbf{derivada logar\'itmica} de la funci\'on de Riccati--Bessel,
+          calculada por \textbf{recurrencia descendente} (Wiscombe, 1980):
+          \begin{equation}
+              D_{n-1}(z) = \frac{n}{z} - \frac{1}{D_n(z) + n/z}
+          \end{equation}
+          partiendo de $D_{n_{\text{mx}}} = 0$ con
+          $n_{\text{mx}} = \max(n_{\max}, |mx|) + 16$.
+    \item $\psi_n(x)$ y $\chi_n(x)$ son las funciones de Riccati--Bessel,
+          generadas por recurrencia ascendente:
+          \begin{equation}
+              f_{n+1}(x) = \frac{2n+1}{x}\,f_n(x) - f_{n-1}(x)
+          \end{equation}
+          con condiciones iniciales $\psi_0 = \sin x$,
+          $\psi_1 = \sin x/x - \cos x$,
+          $\chi_0 = \cos x$, $\chi_1 = \cos x/x + \sin x$.
+    \item $\xi_n(x) = \psi_n(x) - i\,\chi_n(x)$ es la funci\'on de
+          Riccati--Bessel de tercer tipo.
+    \item $n_{\max}$ se determina con el criterio de Wiscombe (1980):
+          $n_{\max} = x + 4\,x^{1/3} + 2$.
+\end{itemize}
+
+El par\'ametro de asimetr\'ia $g$ se obtiene de:
+\begin{equation}
+    g = \frac{4}{Q_{\text{sca}}\,x^2}\sum_{n=2}^{n_{\max}}
+    \left[\frac{(n-1)(n+1)}{n}\text{Re}(a_{n-1}a_n^* + b_{n-1}b_n^*)
+    + \frac{2n-1}{(n-1)n}\text{Re}(a_{n-1}b_{n-1}^*)\right]
+\end{equation}
+
+\subsection{Integraci\'on sobre Distribuci\'on de Tama\~nos}
+
+Los aerosoles atmosf\'ericos siguen una distribuci\'on lognormal:
+\begin{equation}
+    n(r) = \frac{N_0}{r\,\ln\sigma_g\,\sqrt{2\pi}}\,
+    \exp\!\left[-\frac{(\ln r - \ln r_g)^2}{2\ln^2\sigma_g}\right]
+\end{equation}
+
+Las propiedades \'opticas \emph{bulk} (promediadas) son:
+\begin{align}
+    B_{\text{ext}} &= \int_0^{\infty} Q_{\text{ext}}(r)\,\pi r^2\,n(r)\,dr\\
+    B_{\text{sca}} &= \int_0^{\infty} Q_{\text{sca}}(r)\,\pi r^2\,n(r)\,dr\\
+    \text{SSA} &= B_{\text{sca}} / B_{\text{ext}}\\
+    g_{\text{bulk}} &= \frac{\int_0^{\infty} g(r)\,Q_{\text{sca}}(r)\,\pi r^2\,n(r)\,dr}{B_{\text{sca}}}
+\end{align}
+
+
+% ======================================================================
+\part{El Problema Inverso}
+% ======================================================================
+
+% [Figura: Forward vs Inverse Problem -- removida por brevedad]
+
+% ======================================================================
+\section{Planteamiento General del Problema Inverso}
+% ======================================================================
+
+\subsection{Definici\'on del Problema}
+
+El \textbf{problema directo} (forward problem) consiste en calcular las
+radiancias TOA $\mathbf{y}$ a partir de par\'ametros atmosf\'ericos
+$\mathbf{x}$ mediante el solver DISORT:
+\begin{equation}
+    \mathbf{y} = F(\mathbf{x}) + \bm{\epsilon}
+\end{equation}
+donde:
+\begin{itemize}
+    \item $F: \mathbb{R}^n \to \mathbb{R}^m$ es el \textbf{modelo directo}
+          (operador no lineal que mapea par\'ametros a observaciones).
+    \item $\mathbf{x} \in \mathbb{R}^n$ es el \textbf{vector de estado}
+          (par\'ametros a recuperar).
+    \item $\mathbf{y} \in \mathbb{R}^m$ es el \textbf{vector de observaci\'on}
+          ($m = N/2$ radiancias TOA en los nodos de cuadratura ascendentes).
+    \item $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{S}_\epsilon)$ es
+          el \textbf{error de medici\'on} (ruido gaussiano).
+\end{itemize}
+
+El \textbf{problema inverso} busca recuperar $\mathbf{x}$ a partir de
+$\mathbf{y}_{\text{obs}}$:
+\begin{itemize}
+    \item \textbf{Nivel 1}: $\mathbf{x} = [\text{AOD}]^T$ ($n=1$, 1 inc\'ognita)
+    \item \textbf{Nivel 2}: $\mathbf{x} = [\text{AOD},\,\omega_0,\,g]^T$
+          ($n=3$, 3 inc\'ognitas)
+\end{itemize}
+
+\subsection{Mal Condicionamiento (Ill-Posedness)}
+
+Seg\'un Hadamard (1902), un problema est\'a \textbf{bien planteado} si la
+soluci\'on existe, es \'unica, y depende continuamente de los datos.
+Nuestro problema inverso viola las tres condiciones:
+\begin{enumerate}
+    \item \textbf{No unicidad}: Diferentes combinaciones de $(\omega_0, g)$
+          producen radiancias similares (degeneraci\'on AOD--SSA,
+          Secci\'on~\ref{sec:interp_coupling}).
+    \item \textbf{Inestabilidad}: Peque\~nas perturbaciones en
+          $\mathbf{y}_{\text{obs}}$ causan grandes cambios en $\mathbf{x}$
+          (amplificaci\'on del ruido).
+    \item \textbf{Subdeterminaci\'on}: $m = N/2$ observaciones angulares deben
+          determinar par\'ametros con informaci\'on redundante limitada.
+\end{enumerate}
+
+La \textbf{regularizaci\'on} resuelve el mal condicionamiento a\~nadiendo
+informaci\'on \emph{a priori} sobre la soluci\'on esperada, estabilizando el
+problema a costa de introducir un sesgo (bias) controlado.
+
+\subsection{Cuatro M\'etodos Implementados}
+
+Nuestro c\'odigo implementa cuatro m\'etodos de regularizaci\'on, cada uno
+con un enfoque diferente:
+\begin{center}
+\small
+\begin{tabular}{@{}lp{4cm}p{4cm}l@{}}
+\toprule
+\textbf{M\'etodo} & \textbf{Enfoque} & \textbf{Uso en nuestro c\'odigo}
+& \textbf{Nivel} \\ \midrule
+LM + Tikhonov & Penalizaci\'on $L^2$ escalar & Recuperaci\'on principal
+& 1, 2 \\
+Optimal Estimation & Bayesiano (covarianzas) & Recuperaci\'on + diagn\'osticos
+& 1, 2 \\
+Phillips--Twomey & Inversi\'on lineal + L-curve & Demo de selecci\'on de $\gamma$
+& 2 \\
+Total Variation & Penalizaci\'on $L^1$ (IRLS) & Disponible, no usado
+& --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Los dos primeros (LM+Tikhonov y OE) se usan para la recuperaci\'on real de
+par\'ametros.  Phillips--Twomey se usa para demostrar el m\'etodo de la
+L-curve.  Total Variation est\'a implementado para uso futuro (perfiles con
+discontinuidades).
+
+% ======================================================================
+\section{Regularizaci\'on de Tikhonov con Levenberg--Marquardt}
+\label{sec:tikhonov}
+% ======================================================================
+
+\subsection{Funci\'on de Costo}
+
+El m\'etodo de Tikhonov (Tikhonov, 1963) a\~nade un t\'ermino de
+penalizaci\'on que mantiene la soluci\'on cerca de un estado de referencia
+$\mathbf{x}_a$ (llamado \textbf{a priori} o \textbf{estado de fondo}):
+
+\begin{equation}\label{eq:cost_tikhonov}
+    \boxed{J(\mathbf{x}) = \underbrace{\|\mathbf{y}_{\text{obs}} - F(\mathbf{x})\|^2}_{\text{ajuste a datos}}
+    + \underbrace{\gamma\,\|\mathbf{x} - \mathbf{x}_a\|^2}_{\text{regularizaci\'on}}}
+\end{equation}
+
+donde cada s\'imbolo se define como:
+\begin{itemize}
+    \item $\|\mathbf{v}\|^2 = \mathbf{v}^T\mathbf{v} = \sum_i v_i^2$:
+          norma euclidiana al cuadrado.
+    \item $F(\mathbf{x})$: modelo directo DISORT que calcula las $m$ radiancias
+          TOA para el estado $\mathbf{x}$.
+    \item $\mathbf{x}_a$: \textbf{estado a priori}, una estimaci\'on inicial
+          razonable de la soluci\'on.  En nuestro c\'odigo:
+          $\mathbf{x}_a = [0.5]$ (Nivel 1) o $[0.5, 0.85, 0.5]$ (Nivel 2).
+    \item $\gamma > 0$: \textbf{par\'ametro de regularizaci\'on} (escalar).
+          Controla el balance entre ajustar los datos y mantenerse cerca de
+          $\mathbf{x}_a$:
+          \begin{itemize}
+              \item $\gamma \to 0$: la soluci\'on sigue solo los datos
+                    (puede amplificar el ruido).
+              \item $\gamma \to \infty$: la soluci\'on $\to \mathbf{x}_a$
+                    (ignora los datos).
+              \item Nuestro c\'odigo usa $\gamma = 0.01$ (Nivel~1) y
+                    $\gamma = 0.05$ (Nivel~2).
+          \end{itemize}
+\end{itemize}
+
+\subsection{Residuo Aumentado}
+
+Para usar \texttt{scipy.optimize.least\_squares} (que minimiza
+$\|\mathbf{r}\|^2$ para un vector residuo $\mathbf{r}$), se reformula
+$J(\mathbf{x})$ como un problema de m\'inimos cuadrados \textbf{aumentado}:
+\begin{equation}\label{eq:augmented_residual}
+    \mathbf{r}(\mathbf{x}) = \begin{bmatrix}
+        \mathbf{y}_{\text{obs}} - F(\mathbf{x}) \\[4pt]
+        \sqrt{\gamma}\,(\mathbf{x} - \mathbf{x}_a)
+    \end{bmatrix}
+    \in \mathbb{R}^{m+n}
+\end{equation}
+
+El truco es que al calcular $\|\mathbf{r}\|^2$:
+\begin{equation}
+    \|\mathbf{r}\|^2 = \|\mathbf{y}_{\text{obs}} - F(\mathbf{x})\|^2
+    + \gamma\,\|\mathbf{x} - \mathbf{x}_a\|^2 = J(\mathbf{x})
+\end{equation}
+
+El vector $\mathbf{r}$ tiene $m+n$ componentes: las primeras $m$ miden el
+desajuste con los datos, y las \'ultimas $n$ act\'uan como
+``pseudo-observaciones'' que atraen la soluci\'on hacia $\mathbf{x}_a$.
+
+\subsection{Algoritmo de Levenberg--Marquardt (LM)}
+
+El algoritmo LM (Levenberg, 1944; Marquardt, 1963) es un m\'etodo iterativo
+para minimizar $\|\mathbf{r}(\mathbf{x})\|^2$.  En cada iteraci\'on $n$,
+el \textbf{Jacobiano} del residuo se define como:
+\begin{equation}
+    \mathbf{J}_n = \frac{\partial\mathbf{r}}{\partial\mathbf{x}}\bigg|_{\mathbf{x}_n}
+    \in \mathbb{R}^{(m+n)\times n}
+\end{equation}
+
+que nuestro c\'odigo calcula por \textbf{diferencias finitas}:
+\begin{equation}
+    [\mathbf{J}_n]_{ij} \approx \frac{r_i(\mathbf{x}_n + \delta_j\mathbf{e}_j) - r_i(\mathbf{x}_n)}{\delta_j}
+\end{equation}
+
+donde $\mathbf{e}_j$ es el $j$-\'esimo vector unitario y
+$\delta_j = \max(|x_j| \cdot 10^{-2},\, 10^{-8})$.
+
+La actualizaci\'on LM resuelve:
+\begin{equation}\label{eq:lm_update}
+    (\mathbf{J}_n^T\mathbf{J}_n + \lambda_{\text{LM}}\,\mathbf{I})\,\Delta\mathbf{x}
+    = -\mathbf{J}_n^T\,\mathbf{r}(\mathbf{x}_n)
+\end{equation}
+
+donde $\lambda_{\text{LM}} \geq 0$ es el \textbf{par\'ametro de amortiguamiento}
+que controla el tama\~no del paso:
+\begin{itemize}
+    \item $\lambda_{\text{LM}} \to 0$: paso de \textbf{Gauss--Newton}
+          (converge r\'apido cerca del m\'inimo pero puede divergir lejos).
+    \item $\lambda_{\text{LM}} \to \infty$: paso de \textbf{descenso de gradiente}
+          (robusto pero lento).
+\end{itemize}
+
+\texttt{scipy.optimize.least\_squares} ajusta $\lambda_{\text{LM}}$
+autom\'aticamente en cada iteraci\'on usando la estrategia Trust Region
+Reflective (TRF) cuando se proporcionan cotas para los par\'ametros, o LM
+puro cuando no hay cotas.
+
+\begin{physics}{Sesgo de Tikhonov}
+El t\'ermino $\gamma\|\mathbf{x}-\mathbf{x}_a\|^2$ introduce un
+\textbf{sesgo sistem\'atico}: la soluci\'on se desplaza hacia $\mathbf{x}_a$.
+En el Nivel~1 con $\mathbf{x}_a = [0.5]$, los AOD verdaderos extremos
+($\tau < 0.1$ o $\tau > 1.0$) se recuperan con error porque el regularizador
+los atrae hacia 0.5.  Este efecto se reduce con $\gamma$ peque\~no, pero
+no se elimina completamente.  La Optimal Estimation (Secci\'on~\ref{sec:oe})
+permite un control m\'as refinado de este sesgo mediante covarianzas.
+\end{physics}
+
+
+% ======================================================================
+\section{Optimal Estimation (Rodgers, 2000)}\label{sec:oe}
+% ======================================================================
+
+\subsection{Fundamento Bayesiano}
+
+La estimaci\'on \'optima (OE) trata el problema inverso como uno de
+\textbf{inferencia bayesiana} (Rodgers, 2000, Cap.~2--5).  Se asume que tanto
+el estado verdadero como las mediciones son variables aleatorias con
+distribuciones gaussianas conocidas:
+
+\begin{itemize}
+    \item \textbf{A priori}: $\mathbf{x} \sim \mathcal{N}(\mathbf{x}_a, \mathbf{S}_a)$,
+          donde $\mathbf{x}_a \in \mathbb{R}^n$ es la mejor estimaci\'on del
+          estado antes de medir, y $\mathbf{S}_a \in \mathbb{R}^{n\times n}$
+          es su \textbf{matriz de covarianza a priori}.
+          \begin{itemize}
+              \item $[\mathbf{S}_a]_{ii} = \sigma_{a,i}^2$: varianza del
+                    par\'ametro $i$ (incertidumbre al cuadrado).
+              \item $[\mathbf{S}_a]_{ij}$ ($i\neq j$): covarianza entre
+                    par\'ametros (t\'ipicamente cero si son independientes).
+              \item En nuestro c\'odigo (Nivel~2):
+                    $\mathbf{S}_a = \text{diag}(0.3^2, 0.1^2, 0.2^2)$,
+                    lo que significa $\sigma_a(\text{AOD}) = 0.3$,
+                    $\sigma_a(\omega_0) = 0.1$, $\sigma_a(g) = 0.2$.
+          \end{itemize}
+    \item \textbf{Medici\'on}: $\mathbf{y} = F(\mathbf{x}) + \bm{\epsilon}$
+          con $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{S}_\epsilon)$,
+          donde $\mathbf{S}_\epsilon \in \mathbb{R}^{m\times m}$ es la
+          \textbf{matriz de covarianza del error de medici\'on}.
+          \begin{itemize}
+              \item En nuestro c\'odigo:
+                    $\mathbf{S}_\epsilon = \sigma_\epsilon^2\,\mathbf{I}_m$
+                    con $\sigma_\epsilon = 0.02\,\bar{y}$ (2\% de la
+                    radiancia media), asumiendo errores no correlacionados
+                    entre \'angulos.
+          \end{itemize}
+\end{itemize}
+
+Por el \textbf{teorema de Bayes}, la probabilidad posterior del estado dado
+las mediciones es:
+\begin{equation}
+    P(\mathbf{x}|\mathbf{y}) \propto P(\mathbf{y}|\mathbf{x})\,P(\mathbf{x})
+\end{equation}
+
+Sustituyendo las distribuciones gaussianas:
+\begin{equation}
+    P(\mathbf{x}|\mathbf{y}) \propto
+    \exp\!\left[-\frac{1}{2}\left(
+    \underbrace{(\mathbf{y}-F(\mathbf{x}))^T\mathbf{S}_\epsilon^{-1}(\mathbf{y}-F(\mathbf{x}))}_{\chi^2_{\text{datos}}}
+    + \underbrace{(\mathbf{x}-\mathbf{x}_a)^T\mathbf{S}_a^{-1}(\mathbf{x}-\mathbf{x}_a)}_{\chi^2_{\text{a priori}}}
+    \right)\right]
+\end{equation}
+
+Maximizar la probabilidad posterior equivale a minimizar la \textbf{funci\'on
+de costo}:
+\begin{equation}\label{eq:cost_oe}
+    \boxed{J(\mathbf{x}) = (\mathbf{y}-F(\mathbf{x}))^T\mathbf{S}_\epsilon^{-1}(\mathbf{y}-F(\mathbf{x}))
+    + (\mathbf{x}-\mathbf{x}_a)^T\mathbf{S}_a^{-1}(\mathbf{x}-\mathbf{x}_a)}
+\end{equation}
+
+\begin{concept}{Relaci\'on con Tikhonov}
+Comparando las Ecs.~\eqref{eq:cost_tikhonov} y~\eqref{eq:cost_oe}: Tikhonov
+usa un escalar $\gamma$ que penaliza todos los par\'ametros por igual; OE usa
+matrices $\mathbf{S}_a^{-1}$ y $\mathbf{S}_\epsilon^{-1}$ que permiten pesar
+cada par\'ametro y cada medici\'on de forma independiente.  Si
+$\mathbf{S}_a = \gamma^{-1}\mathbf{I}$ y $\mathbf{S}_\epsilon = \mathbf{I}$,
+OE se reduce exactamente a Tikhonov.
+\end{concept}
+
+\subsection{Iteraci\'on de Gauss--Newton}
+
+Como $F(\mathbf{x})$ es no lineal, se minimiza $J$ iterativamente.  En cada
+iteraci\'on $n$, se linealiza el modelo directo alrededor del estado actual
+$\mathbf{x}_n$:
+\begin{equation}
+    F(\mathbf{x}) \approx F(\mathbf{x}_n) + \mathbf{K}_n(\mathbf{x}-\mathbf{x}_n)
+\end{equation}
+
+donde $\mathbf{K}_n \in \mathbb{R}^{m \times n}$ es el \textbf{Jacobiano}
+(o \textbf{weighting function matrix}):
+\begin{equation}
+    [\mathbf{K}_n]_{ij} = \frac{\partial F_i}{\partial x_j}\bigg|_{\mathbf{x}_n}
+\end{equation}
+
+Nuestro c\'odigo calcula $\mathbf{K}$ por \textbf{diferencias finitas
+hacia adelante}: se perturba cada par\'ametro $x_j$ una cantidad
+$\delta_j = \max(|x_j| \cdot 0.01, 10^{-8})$ y se mide el cambio en las
+radiancias.
+
+Sustituyendo la linealizaci\'on en~\eqref{eq:cost_oe} y derivando con
+respecto a $\mathbf{x}$, la actualizaci\'on es (Rodgers, 2000, Ec.~5.8):
+
+\begin{equation}\label{eq:oe_update}
+    \boxed{\mathbf{x}_{n+1} = \mathbf{x}_a + \mathbf{G}_n\left[
+    \mathbf{y} - F(\mathbf{x}_n) + \mathbf{K}_n(\mathbf{x}_n - \mathbf{x}_a)
+    \right]}
+\end{equation}
+
+donde la \textbf{gain matrix} (matriz de ganancia, Rodgers Ec.~5.9) es:
+\begin{equation}\label{eq:gain}
+    \mathbf{G}_n = \underbrace{\left(\mathbf{K}_n^T\mathbf{S}_\epsilon^{-1}\mathbf{K}_n
+    + \mathbf{S}_a^{-1}\right)^{-1}}_{\hat{\mathbf{S}}_n}\mathbf{K}_n^T\mathbf{S}_\epsilon^{-1}
+\end{equation}
+
+La expresi\'on entre par\'entesis invertida es la \textbf{covarianza posterior}
+$\hat{\mathbf{S}}_n$, que ya contiene toda la informaci\'on sobre la
+incertidumbre de la soluci\'on.
+
+Opcionalmente, nuestro c\'odigo a\~nade amortiguamiento LM al t\'ermino
+de la inversa: $\hat{\mathbf{S}}_n^{-1} + \gamma_{\text{LM}}\,
+\text{diag}(\hat{\mathbf{S}}_n^{-1})$, lo que estabiliza las primeras
+iteraciones lejos del m\'inimo (usado en Nivel~2b con $\gamma_{\text{LM}} = 0.05$).
+
+\subsection{Diagn\'osticos de la Recuperaci\'on}
+
+Una ventaja fundamental de OE sobre Tikhonov es que proporciona
+\textbf{diagn\'osticos cuantitativos} de la calidad de la inversi\'on.
+
+\subsubsection{Covarianza Posterior $\hat{\mathbf{S}}$}
+
+\begin{equation}
+    \hat{\mathbf{S}} = \left(\mathbf{K}^T\mathbf{S}_\epsilon^{-1}\mathbf{K}
+    + \mathbf{S}_a^{-1}\right)^{-1}
+\end{equation}
+
+$\hat{\mathbf{S}}$ es la covarianza de la distribuci\'on posterior gaussiana.
+$\sqrt{[\hat{\mathbf{S}}]_{ii}}$ da la \textbf{incertidumbre posterior} del
+par\'ametro $i$: si los datos son informativos, $\sqrt{[\hat{\mathbf{S}}]_{ii}}
+< \sigma_{a,i}$ (la incertidumbre se reduce respecto al a priori).
+
+\subsubsection{Averaging Kernel $\mathbf{A}$}
+
+\begin{equation}
+    \mathbf{A} = \mathbf{G}\,\mathbf{K} = \frac{\partial\hat{\mathbf{x}}}{\partial\mathbf{x}_{\text{true}}}
+    \in \mathbb{R}^{n \times n}
+\end{equation}
+
+El \textbf{averaging kernel} describe la sensibilidad de la soluci\'on
+recuperada al estado verdadero.  Cada fila $i$ de $\mathbf{A}$ muestra c\'omo
+el par\'ametro recuperado $\hat{x}_i$ depende de todos los par\'ametros
+verdaderos:
+\begin{itemize}
+    \item $\mathbf{A} = \mathbf{I}_n$: recuperaci\'on perfecta (cada par\'ametro
+          se determina independientemente).
+    \item $\mathbf{A} \approx \mathbf{0}$: la soluci\'on est\'a dominada por
+          el a priori (los datos no aportan informaci\'on).
+\end{itemize}
+
+\subsubsection{Degrees of Freedom for Signal (DFS)}
+
+\begin{equation}
+    \text{DFS} = \text{tr}(\mathbf{A})
+\end{equation}
+
+DFS es el n\'umero efectivo de piezas de informaci\'on independiente
+extra\'idas de las mediciones.  Para $n$ par\'ametros:
+$\text{DFS} \leq n$.  En nuestro Nivel~2 ($n=3$), DFS $\approx 2.5$--$2.8$
+indica que no toda la informaci\'on de los 3 par\'ametros es independiente
+(existe acoplamiento AOD--SSA--$g$).
+
+\subsubsection{Criterio de Convergencia}
+
+La convergencia se eval\'ua con la \textbf{distancia de Mahalanobis}
+del paso (Rodgers, 2000, Ec.~5.29):
+\begin{equation}
+    d^2 = (\mathbf{x}_{n+1}-\mathbf{x}_n)^T\hat{\mathbf{S}}_n^{-1}
+    (\mathbf{x}_{n+1}-\mathbf{x}_n)
+\end{equation}
+
+Se considera convergido cuando $d^2 < n \cdot \epsilon_{\text{conv}}$, donde
+$\epsilon_{\text{conv}} = 0.1$ en nuestro c\'odigo.  F\'isicamente, esto
+significa que el paso es peque\~no comparado con la incertidumbre posterior.
+M\'aximo 20 iteraciones (30 para Nivel~2b).
+
+
+% ======================================================================
+\section{Regularizaci\'on de Phillips--Twomey}\label{sec:pt}
+% ======================================================================
+
+\subsection{Formulaci\'on}
+
+A diferencia de LM y OE que iteran sobre el modelo no lineal $F(\mathbf{x})$,
+el m\'etodo Phillips--Twomey (Phillips, 1962; Twomey, 1963) resuelve una
+versi\'on \textbf{linealizada} del problema.  Se linealiza $F$ alrededor de un
+punto de referencia (t\'ipicamente la soluci\'on OE):
+\begin{equation}
+    \mathbf{y} \approx F(\mathbf{x}_0) + \mathbf{K}(\mathbf{x} - \mathbf{x}_0)
+    = \mathbf{K}\mathbf{x} + \text{const}
+\end{equation}
+
+donde $\mathbf{K}$ es el Jacobiano evaluado en $\mathbf{x}_0$ (en nuestro
+c\'odigo se toma de la \'ultima iteraci\'on de OE: \texttt{res\_oe2["K"]}).
+
+El problema linealizado minimiza:
+\begin{equation}
+    J(\mathbf{x}) = \underbrace{\|\mathbf{y} - \mathbf{K}\mathbf{x}\|^2}_{\text{ajuste}}
+    + \underbrace{\gamma\,\|\mathbf{H}\mathbf{x}\|^2}_{\text{penalizaci\'on}}
+\end{equation}
+
+donde cada t\'ermino se define como:
+\begin{itemize}
+    \item $\mathbf{K} \in \mathbb{R}^{m \times n}$: Jacobiano del modelo directo.
+    \item $\mathbf{H} \in \mathbb{R}^{p \times n}$: \textbf{matriz de restricci\'on}
+          (constraint matrix) que penaliza propiedades no deseadas en la
+          soluci\'on (ver abajo).
+    \item $\gamma > 0$: par\'ametro de regularizaci\'on (misma funci\'on que en
+          Tikhonov).
+\end{itemize}
+
+Derivando $J$ respecto a $\mathbf{x}$ e igualando a cero se obtiene la
+\textbf{soluci\'on cerrada} (no iterativa):
+\begin{equation}\label{eq:pt_solution}
+    \boxed{\hat{\mathbf{x}} = (\mathbf{K}^T\mathbf{K}
+    + \gamma\,\mathbf{H}^T\mathbf{H})^{-1}\mathbf{K}^T\mathbf{y}}
+\end{equation}
+
+\subsection{Matrices de Restricci\'on $\mathbf{H}$}
+
+La elecci\'on de $\mathbf{H}$ determina qu\'e propiedad de la soluci\'on se
+penaliza:
+
+\textbf{Orden 0} ($\mathbf{H} = \mathbf{I}_n$, penaliza la \emph{magnitud}):
+\begin{equation}
+    \|\mathbf{H}\mathbf{x}\|^2 = \|\mathbf{x}\|^2 = \sum_i x_i^2
+\end{equation}
+
+Equivalente a Tikhonov cl\'asico con $\mathbf{x}_a = \mathbf{0}$.
+
+\textbf{Orden 1} ($\mathbf{H} = \mathbf{D}_1$, penaliza el \emph{gradiente}):
+\begin{equation}
+    \mathbf{D}_1 = \begin{bmatrix}
+        -1 & 1 & & \\
+        & -1 & 1 & \\
+        & & \ddots & \ddots
+    \end{bmatrix}_{(n-1)\times n}
+    \qquad
+    \|\mathbf{D}_1\mathbf{x}\|^2 = \sum_i (x_{i+1}-x_i)^2
+\end{equation}
+
+Produce soluciones suaves (sin saltos bruscos).
+
+\textbf{Orden 2} ($\mathbf{H} = \mathbf{D}_2$, penaliza la \emph{curvatura}):
+\begin{equation}
+    \mathbf{D}_2 = \begin{bmatrix}
+        1 & -2 & 1 & & \\
+        & 1 & -2 & 1 & \\
+        & & \ddots & \ddots & \ddots
+    \end{bmatrix}_{(n-2)\times n}
+    \qquad
+    \|\mathbf{D}_2\mathbf{x}\|^2 = \sum_i (x_{i+2}-2x_{i+1}+x_i)^2
+\end{equation}
+
+Produce soluciones muy suaves, penalizando cambios en la pendiente.
+\textbf{Nuestro c\'odigo usa orden 2} para el an\'alisis L-curve del Nivel~2.
+
+\subsection{Selecci\'on de $\gamma$: M\'etodo de la L-Curve}
+
+El problema cr\'itico en cualquier regularizaci\'on es elegir $\gamma$.
+El m\'etodo de la \textbf{L-curve} (Hansen, 1992) es un enfoque gr\'afico:
+\begin{enumerate}
+    \item Para cada $\gamma$ en un rango (nuestro c\'odigo:
+          $\gamma \in [10^{-4}, 10^2]$, 30 puntos logar\'itmicamente
+          espaciados), se resuelve~\eqref{eq:pt_solution}.
+    \item Se calcula la \textbf{norma del residuo}
+          $\rho(\gamma) = \|\mathbf{y}-\mathbf{K}\hat{\mathbf{x}}(\gamma)\|$
+          y la \textbf{norma de la soluci\'on}
+          $\eta(\gamma) = \|\mathbf{H}\hat{\mathbf{x}}(\gamma)\|$.
+    \item Se grafica $(\log\rho, \log\eta)$: la curva resultante tiene forma
+          de ``L''.
+\end{enumerate}
+
+\begin{equation}
+    \text{eje-}x: \log\|\mathbf{y}-\mathbf{K}\hat{\mathbf{x}}\|, \qquad
+    \text{eje-}y: \log\|\mathbf{H}\hat{\mathbf{x}}\|
+\end{equation}
+
+El $\gamma$ \'optimo est\'a en la \textbf{esquina} de la curva L:
+\begin{itemize}
+    \item Rama horizontal ($\gamma$ peque\~no): buen ajuste a datos
+          ($\rho$ peque\~no) pero soluci\'on irregular ($\eta$ grande).
+    \item Rama vertical ($\gamma$ grande): soluci\'on suave ($\eta$ peque\~no)
+          pero mal ajuste ($\rho$ grande).
+    \item Esquina: balance \'optimo entre ajuste y suavidad.
+\end{itemize}
+
+\begin{physics}{Por qu\'e Phillips--Twomey es solo una demostraci\'on}
+PT requiere un modelo \emph{lineal} $\mathbf{y} = \mathbf{K}\mathbf{x}$,
+pero nuestro modelo DISORT es no lineal.  Por eso usamos el $\mathbf{K}$ de
+OE (que ya linealiz\'o alrededor de la soluci\'on).  En la pr\'actica, LM y
+OE son superiores para recuperaci\'on porque iteran sobre el modelo no lineal
+completo.  PT se usa en nuestro c\'odigo \'unicamente para ilustrar el
+concepto de L-curve y la selecci\'on de $\gamma$.
+\end{physics}
+
+
+% ======================================================================
+\section{Regularizaci\'on Total Variation (TV)}\label{sec:tv}
+% ======================================================================
+
+\subsection{Motivaci\'on}
+
+Los m\'etodos anteriores (Tikhonov, OE, PT) penalizan la norma $L^2$ de las
+diferencias, lo que produce soluciones \textbf{suaves} (derivable en todas
+partes).  Sin embargo, en perfiles atmosf\'ericos reales pueden existir
+\textbf{discontinuidades} (por ejemplo, una capa de aerosol con bordes
+abruptos).  La regularizaci\'on $L^2$ suaviza estos bordes, perdiendo
+informaci\'on.
+
+La \textbf{Total Variation} (TV) (Rudin et al., 1992) usa la norma $L^1$ en
+lugar de $L^2$:
+\begin{equation}
+    J(\mathbf{x}) = \|\mathbf{y} - \mathbf{K}\mathbf{x}\|^2
+    + \gamma\,\underbrace{\text{TV}(\mathbf{x})}_{\text{norma } L^1}
+\end{equation}
+
+donde la \textbf{variaci\'on total} discreta es:
+\begin{equation}
+    \text{TV}(\mathbf{x}) = \sum_{i=1}^{n-1}|x_{i+1} - x_i|
+\end{equation}
+
+La diferencia clave con $L^2$ es que $|z|$ penaliza diferencias grandes
+\emph{linealmente} (no cuadr\'aticamente), lo que permite que la soluci\'on
+tenga saltos bruscos sin ser excesivamente penalizada.
+
+\subsection{M\'etodo IRLS (Iteratively Reweighted Least Squares)}
+
+La norma $L^1$ no es diferenciable en cero, lo que impide el uso directo de
+m\'etodos de m\'inimos cuadrados.  El truco es aproximarla iterativamente
+como una norma $L^2$ ponderada (\textbf{IRLS}):
+
+En cada iteraci\'on $k$:
+\begin{enumerate}
+    \item \textbf{Calcular pesos} a partir de la soluci\'on actual:
+    \begin{equation}
+        w_i^{(k)} = \frac{1}{|x_{i+1}^{(k)} - x_i^{(k)}| + \epsilon}
+    \end{equation}
+    donde $\epsilon = 10^{-6}$ evita divisi\'on por cero.  Donde las
+    diferencias son \emph{grandes} (bordes), $w_i$ es \emph{peque\~no}
+    $\to$ menos penalizaci\'on $\to$ el borde se preserva.  Donde las
+    diferencias son \emph{peque\~nas} (regiones suaves), $w_i$ es
+    \emph{grande} $\to$ m\'as penalizaci\'on $\to$ se suaviza.
+
+    \item \textbf{Ensamblar la penalizaci\'on ponderada}:
+    \begin{align}
+        \mathbf{W}^{(k)} &= \text{diag}(w_1^{(k)},\ldots,w_{n-1}^{(k)})\\
+        \mathbf{H}^{(k)} &= \sqrt{\mathbf{W}^{(k)}}\,\mathbf{D}_1
+    \end{align}
+
+    \item \textbf{Resolver el subproblema de Tikhonov ponderado}:
+    \begin{equation}
+        \mathbf{x}^{(k+1)} = (\mathbf{K}^T\mathbf{K}
+        + \gamma\,(\mathbf{H}^{(k)})^T\mathbf{H}^{(k)})^{-1}\mathbf{K}^T\mathbf{y}
+    \end{equation}
+
+    \item \textbf{Verificar convergencia}:
+    $\|\mathbf{x}^{(k+1)} - \mathbf{x}^{(k)}\| / \|\mathbf{x}^{(k)}\| < 10^{-6}$.
+\end{enumerate}
+
+Nuestro c\'odigo usa hasta 20 iteraciones IRLS (t\'ipicamente converge en
+3--10).
+
+\begin{concept}{Estado actual: TV no se usa en los niveles 1--3}
+TV est\'a implementado en \texttt{TotalVariation} pero no se utiliza en
+ninguno de los tres niveles porque:
+\begin{itemize}
+    \item Los perfiles de aerosol que modelamos son suaves (distribuci\'on
+          exponencial), sin discontinuidades.
+    \item Con solo $n = 1$ o $n = 3$ par\'ametros, la regularizaci\'on TV no
+          aporta ventaja sobre Tikhonov/OE.
+    \item TV ser\'ia relevante para recuperar perfiles verticales de AOD con
+          bordes abruptos (por ejemplo, capas de polvo sahariano).
+\end{itemize}
+\end{concept}
+
+
+% ======================================================================
+\part{Integraci\'on: Del Modelo F\'isico a la Recuperaci\'on de Aerosoles}
+% ======================================================================
+
+% ======================================================================
+\section{Pipeline Completo: Paso a Paso}
+% ======================================================================
+
+A continuaci\'on se describe c\'omo todas las piezas desarrolladas en las
+partes anteriores se integran en un flujo de trabajo coherente para resolver
+el problema directo-inverso completo.
+
+\subsection{Paso 1: Construcci\'on del Perfil Atmosf\'erico}
+
+\begin{enumerate}
+    \item Se inicializa la \textbf{atm\'osfera est\'andar} US-1976
+          (\texttt{StandardAtmosphere}) con los perfiles de $T(z)$, $P(z)$,
+          $n_{\text{air}}(z)$ calculados por la ecuaci\'on hidrost\'atica
+          (Secci\'on~\ref{sec:us76}).
+
+    \item Se calcula el \textbf{espesor \'optico de Rayleigh} por capa
+          $\tau_{\text{Ray},k}$ a la longitud de onda deseada
+          (Secci\'on~\ref{sec:rayleigh}).
+
+    \item Se computan las \textbf{propiedades \'opticas del aerosol}
+          ($\omega_{\text{aer}}$, $g_{\text{aer}}$) a partir de la teor\'ia
+          de Mie integrada sobre una distribuci\'on de tama\~nos lognormal
+          (Secci\'on~\ref{sec:mie}).
+
+    \item Se distribuye el AOD total verticalmente usando un perfil exponencial
+          $\tau_{\text{aer}}(z) \propto e^{-z/H}$ con altura de escala $H$,
+          y se combinan Rayleigh + aerosol para obtener
+          $(\tau_k, \omega_{0,k}, g_k)$ por capa.
+
+    \item El resultado es un \texttt{AtmosphereProfile} con 20 capas listo
+          para el solver.
+\end{enumerate}
+
+\subsection{Paso 2: Modelo Directo (Forward)}
+
+\begin{enumerate}
+    \item \textbf{Delta-M scaling} (Secci\'on~\ref{sec:deltam}):
+          Se escalan $(\tau_k, \omega_{0,k}, g_k) \to (\tau'_k, \omega'_{0,k}, g'_k)$
+          para truncar el pico de forward scattering.
+
+    \item \textbf{Eigen-decomposici\'on por capa}: Para cada capa $k$:
+    \begin{enumerate}
+        \item Se construye la matriz de fase $\mathbf{P}_k$ via
+              Ec.~\eqref{eq:phase_matrix}.
+        \item Se construye la matriz del sistema
+              $\mathbf{A}_k = \mathbf{M}^{-1}(\mathbf{I}_N - \frac{\omega'_{0,k}}{2}\mathbf{P}_k\mathbf{W})$.
+        \item Se computan autovalores y autovectores:
+              $\mathbf{A}_k\mathbf{E}_k = \mathbf{E}_k\bm{\Lambda}_k$.
+        \item Se ordenan los eigenvalores: $\text{Re}(\lambda_j) \geq 0$ primero,
+              $\text{Re}(\lambda_j) < 0$ despu\'es (estabilizaci\'on,
+              Secci\'on~\ref{sec:scaling}).
+        \item Se resuelve el sistema particular
+              $(\mathbf{A}_k + \mu_0^{-1}\mathbf{I}_N)\mathbf{Z}_{p,k} = -\mathbf{S}_k$.
+    \end{enumerate}
+
+    \item \textbf{Ensamblaje del sistema global de frontera}: Se construye la
+          matriz $\mathbf{B}$ de tama\~no $NK \times NK$ con:
+    \begin{itemize}
+        \item $N/2$ ecuaciones de TOA (Ec.~\ref{eq:bc_toa}),
+        \item $N(K-1)$ ecuaciones de continuidad (Ec.~\ref{eq:bc_interface_expanded}),
+        \item $N/2$ ecuaciones de BOA con superficie Lambertiana (Ec.~\ref{eq:bc_boa}).
+    \end{itemize}
+    Todos los t\'erminos exponenciales usan la forma estabilizada
+    (Ec.~\ref{eq:stable_exp}).
+
+    \item \textbf{Resoluci\'on}: $\mathbf{B}\hat{\mathbf{c}} = \mathbf{b}$
+          mediante \texttt{scipy.linalg.solve}.
+
+    \item \textbf{Extracci\'on de radiancias TOA}: Se eval\'ua la
+          Ec.~\eqref{eq:I_toa} para obtener el vector de observaci\'on
+          $\mathbf{y} = F(\mathbf{x})$.
+\end{enumerate}
+
+\subsection{Paso 3: Generaci\'on de Observaciones Sint\'eticas}
+
+Para validar la inversi\'on, se generan observaciones sint\'eticas:
+\begin{equation}
+    \mathbf{y}_{\text{obs}} = F(\mathbf{x}_{\text{true}})
+    + \bm{\epsilon}, \qquad
+    \bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{S}_\epsilon)
+\end{equation}
+
+con $\mathbf{S}_\epsilon = \text{diag}(\sigma_1^2,\ldots,\sigma_m^2)$ donde
+$\sigma_i = \delta \cdot y_i$ ($\delta = 0.02$ para 2\% de ruido relativo).
+
+\subsection{Paso 4: Inversi\'on (Retrieval)}
+
+Se aplican los m\'etodos de inversi\'on:
+
+\begin{enumerate}
+    \item \textbf{LM + Tikhonov} (\texttt{InverseOptimizer}):
+          Minimiza la Ec.~\eqref{eq:cost_tikhonov} usando
+          \texttt{scipy.optimize.least\_squares} con residuo aumentado.
+          R\'apido y robusto para problemas peque\~nos.
+
+    \item \textbf{Optimal Estimation} (\texttt{OptimalEstimation}):
+          Itera la Ec.~\eqref{eq:oe_update} hasta convergencia.
+          Proporciona diagn\'osticos completos: $\hat{\mathbf{S}}$,
+          $\mathbf{A}$, DFS, funci\'on de costo.
+
+    \item \textbf{Phillips--Twomey} (\texttt{PhillipsTwomey}):
+          Inversi\'on lineal con la Ec.~\eqref{eq:pt_solution} usando
+          $\mathbf{K}$ del \'ultimo paso de OE.  Se usa L-curve para
+          seleccionar $\gamma$.
+
+    \item \textbf{Total Variation} (\texttt{TotalVariation}):
+          IRLS para preservar bordes en el perfil recuperado.
+\end{enumerate}
+
+\subsection{Paso 5: Diagn\'osticos y Validaci\'on}
+
+\begin{enumerate}
+    \item \textbf{Self-consistency}: $F(\mathbf{x}_{\text{true}}) \to$
+          retrieval $\to$ $|\hat{\mathbf{x}} - \mathbf{x}_{\text{true}}|
+          / |\mathbf{x}_{\text{true}}| < 0.01\%$?
+
+    \item \textbf{Averaging kernels}: $\mathbf{A} \approx \mathbf{I}$?
+          DFS $\approx n$?
+
+    \item \textbf{Incertidumbre posterior}: $\sqrt{\text{diag}(\hat{\mathbf{S}})}$
+          es consistente con el error real del retrieval?
+
+    \item \textbf{Sensibilidad al ruido}: Para m\'ultiples realizaciones de
+          ruido, $\text{std}(\hat{\mathbf{x}}) \approx
+          \sqrt{\text{diag}(\hat{\mathbf{S}})}$?
+
+    \item \textbf{Sensibilidad al a priori}: Con $\mathbf{S}_a$ grande (a priori
+          d\'ebil), el resultado debe ser independiente de $\mathbf{x}_a$.
+\end{enumerate}
+
+
+% ======================================================================
+\section{Resumen de la Cadena Matem\'atica}
+% ======================================================================
+
+La siguiente cadena resume la transformaci\'on matem\'atica completa desde
+los par\'ametros f\'isicos hasta la recuperaci\'on:
+
+\begin{equation*}
+    \underbrace{(r_g, \sigma_g, m)}_{\text{Microf\'isica}}
+    \xrightarrow{\text{Mie}}
+    \underbrace{(\omega_0, g)}_{\text{\'Optica}}
+    \xrightarrow{\text{US-76 + Rayleigh}}
+    \underbrace{(\tau_k, \omega_{0,k}, g_k)}_{\text{Perfil}}
+    \xrightarrow{\delta\text{-M}}
+    \underbrace{(\tau'_k, \omega'_{0,k}, g'_k)}_{\text{Escalado}}
+\end{equation*}
+
+\begin{equation*}
+    \xrightarrow{\text{Eigen}}
+    \underbrace{(\lambda_j, E_{ij}, Z_{p,i})_k}_{\text{Modos}}
+    \xrightarrow{\text{BC}}
+    \underbrace{\hat{C}_{k,j}}_{\text{Constantes}}
+    \xrightarrow{\text{Eval.\ TOA}}
+    \underbrace{I_i^{\text{TOA}}}_{\text{Radiancias}}
+    \xrightarrow{\text{Inversi\'on}}
+    \underbrace{\hat{\mathbf{x}}}_{\text{Retrieval}}
+\end{equation*}
+
+Cada paso es trazable, verificable y tiene significado f\'isico claro.
+
+
+% ======================================================================
+\section{Resultados de Validaci\'on}
+% ======================================================================
+
+\subsection{Forward Model: 4/4 Tests}
+
+\begin{enumerate}
+    \item \textbf{L\'imite $\tau \to 0$}: Sin atm\'osfera, la radiancia TOA
+          es solo la reflexi\'on directa de superficie:
+          $I \approx (A_s/\pi)\mu_0 F_0$. \textbf{PASS}.
+
+    \item \textbf{Convergencia con $N$}: Las radiancias convergen para
+          $N = 4 \to 8 \to 16 \to 32$. \textbf{PASS}.
+
+    \item \textbf{Consistencia mono/multi-capa}: Una capa con $\tau=1$ produce
+          los mismos resultados que 20 capas con $\tau=0.05$ cada una.
+          $\Delta_{\text{rel}} < 10^{-6}$. \textbf{PASS}.
+
+    \item \textbf{Absorci\'on pura}: Con $\omega_0 \approx 0$ y $A_s = 0$,
+          la radiancia TOA es m\'inima. \textbf{PASS}.
+\end{enumerate}
+
+\subsection{Inverse Model: 3/3 Tests}
+
+\begin{enumerate}
+    \item \textbf{Self-consistency (sin ruido)}: Error de retrieval
+          $< 0.01\%$. \textbf{PASS}.
+
+    \item \textbf{OE self-consistency}: Retrieval converge con DFS$\approx 1$.
+          \textbf{PASS}.
+
+    \item \textbf{Sensibilidad al a priori}: Con $\mathbf{S}_a$ grande,
+          el resultado es independiente de $\mathbf{x}_a$ (spread $< 10^{-4}$).
+          \textbf{PASS}.
+\end{enumerate}
+
+
+% ======================================================================
+\section{Par\'ametros del Modelo}
+% ======================================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llp{6.5cm}l@{}}
+\toprule
+\textbf{Par\'ametro} & \textbf{S\'imbolo} & \textbf{Descripci\'on} & \textbf{Rango} \\ \midrule
+Espesor \'Optico & $\tau$ (AOD) & Extinci\'on total integrada verticalmente & $[0.01, 5]$ \\
+Albedo Disp.\ Simple & $\omega_0$ & Fracci\'on dispersi\'on/extinci\'on & $(0, 1)$ \\
+Par\'am.\ Asimetr\'ia & $g$ & Preferencia angular de dispersi\'on & $(-1, 1)$ \\
+Albedo Superficie & $A_s$ & Reflectividad Lambertiana & $[0, 1]$ \\
+\'Ang.\ Cenital Solar & $\theta_0$ & Posici\'on del sol & $[0, 85\degree]$ \\
+Flujo Solar & $F_0$ & Irradiancia TOA ($\pi$ por convenci\'on) & W\,m$^{-2}$ \\
+N\'um.\ Streams & $N$ & Direcciones angulares discretas & $\{4,8,16,32\}$ \\
+Longitud de Onda & $\lambda$ & Longitud de onda de c\'alculo & nm \\
+Altura Escala Aerosol & $H$ & Distribuci\'on vertical del aerosol & km \\
+Regularizaci\'on & $\gamma$ & Balance datos/suavidad & $> 0$ \\
+\bottomrule
+\end{tabular}
+\caption{Par\'ametros del modelo y su significado f\'isico.}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llp{6.5cm}l@{}}
+\toprule
+\textbf{Par\'ametro} & \textbf{S\'imbolo} & \textbf{Descripci\'on} & \textbf{Valor} \\ \midrule
+Exp.\ \AA ngstr\"om & $\alpha$ & Dependencia espectral del AOD & $\sim 1.5$ \\
+Fracci\'on Difusa & $f_d$ & DHI/GHI observable SURFRAD & $[0, 1]$ \\
+Bandas BB & $\lambda_b$ & Longitudes de onda del modelo 3-bandas & 400, 550, 800\,nm \\
+\bottomrule
+\end{tabular}
+\caption{Par\'ametros adicionales del Nivel 3 (SURFRAD).}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Tipo Aerosol} & $r_g$ ($\mu$m) & $\sigma_g$ & $n_r$ & $n_i$ \\ \midrule
+Continental     & 0.03 & 2.24 & 1.53 & 0.008 \\
+Urbano          & 0.03 & 2.24 & 1.55 & 0.025 \\
+Mar\'itimo       & 0.40 & 2.51 & 1.38 & 0.001 \\
+Polvo Des\'ertico & 0.50 & 2.20 & 1.53 & 0.005 \\
+Quema Biomasa   & 0.07 & 1.80 & 1.52 & 0.020 \\
+\bottomrule
+\end{tabular}
+\caption{Presets de tipos de aerosol (basados en OPAC y Dubovik).}
+\end{table}
+
+
+% ======================================================================
+\section{Implementaci\'on del Nivel 2: Atm\'osfera de 20 Capas}\label{sec:level2_impl}
+% ======================================================================
+
+El Nivel~2 representa la configuraci\'on realista del modelo: una atm\'osfera
+multicapa con dispersi\'on de Rayleigh y aerosoles distribuidos verticalmente,
+donde se recuperan simult\'aneamente tres par\'ametros:
+$\mathbf{x} = [\text{AOD},\,\omega_0,\,g]^T$.
+
+\subsection{Configuraci\'on del Aerosol}
+
+Se utiliza el preset \textbf{continental} de la Tabla~3, con los par\'ametros
+microf\'isicos:
+\begin{center}
+    $r_g = 0.03\;\mu$m, \quad $\sigma_g = 2.24$, \quad
+    $m = 1.53 + 0.008i$
+\end{center}
+
+A la longitud de onda de referencia $\lambda = 550$\,nm, la teor\'ia de Mie
+(Secci\'on~\ref{sec:mie}) integrada sobre la distribuci\'on lognormal
+(200 radios en $[r_g/10,\, r_g \cdot 10]$ con integraci\'on trapezoidal)
+produce las propiedades \'opticas \emph{bulk}:
+\begin{center}
+    $\omega_{\text{aer}} = \text{SSA}_{\text{Mie}}$, \qquad
+    $g_{\text{aer}} = g_{\text{Mie}}$
+\end{center}
+
+Estos valores dependen \'unicamente de la microf\'isica y la longitud de onda;
+no del AOD, que es un par\'ametro libre de la inversi\'on.
+
+\subsection{Construcci\'on del Perfil Atmosf\'erico}
+
+La cadena de construcci\'on es:
+\begin{enumerate}
+    \item \texttt{StandardAtmosphere($\lambda$)}: genera los 20 niveles de la
+          US-1976 (Secci\'on~\ref{sec:us76}) y calcula $\tau_{\text{Ray},k}$
+          por capa.
+
+    \item \texttt{to\_profile(aod\_total, ssa\_aer, g\_aer, H\_aer\_km)}:
+    \begin{enumerate}
+        \item Distribuye el AOD total con el perfil exponencial
+              (Secci\'on~\ref{sec:aer_vertical}):
+              \[
+                  \tau_{\text{aer},k} = \text{AOD}_{\text{total}}
+                  \cdot \frac{e^{-z_{\text{mid},k}/H}}
+                  {\sum_{j=1}^{20} e^{-z_{\text{mid},j}/H} \cdot \Delta z_j}
+                  \cdot \Delta z_k
+              \]
+              con $H = 2.0$\,km.
+
+        \item Combina Rayleigh y aerosol capa por capa:
+              \begin{align*}
+                  \tau_k &= \tau_{\text{Ray},k} + \tau_{\text{aer},k} \\
+                  \omega_{0,k} &= \frac{\tau_{\text{Ray},k} + \omega_{\text{aer}}\,\tau_{\text{aer},k}}{\tau_k} \\
+                  g_k &= \frac{\omega_{\text{aer}}\,g_{\text{aer}}\,\tau_{\text{aer},k}}{\tau_{\text{Ray},k} + \omega_{\text{aer}}\,\tau_{\text{aer},k}}
+              \end{align*}
+              (Rayleigh puro: $\omega_{\text{Ray}} = 1$, $g_{\text{Ray}} = 0$.)
+    \end{enumerate}
+
+    \item El resultado es un \texttt{AtmosphereProfile} con 20 capas, listo
+          para el solver DISORT con $N = 36$ streams.
+\end{enumerate}
+
+\subsection{Modelo Directo y Observaciones}
+
+El solver DISORT resuelve el problema directo con delta-M scaling activado,
+produciendo $m = N/2 = 18$ radiancias TOA upwelling (en los nodos de
+cuadratura ascendentes). Adicionalmente, se calculan radiancias en \'angulos
+arbitrarios mediante la integraci\'on de funci\'on fuente
+(Ecs.~35a,b del reporte).
+
+Las observaciones sint\'eticas se generan como:
+\begin{equation}
+    \mathbf{y}_{\text{obs}} = F(\mathbf{x}_{\text{true}}) + \bm{\epsilon},
+    \qquad \bm{\epsilon} \sim \mathcal{N}(\mathbf{0},\,\mathbf{S}_\epsilon)
+\end{equation}
+con ruido relativo configurable (t\'ipicamente $\delta = 0\%$ para
+validaci\'on, $2\%$ para pruebas de robustez).
+
+\subsection{Configuraci\'on de la Inversi\'on}
+
+Se aplican dos m\'etodos principales:
+
+\paragraph{LM + Tikhonov}
+\begin{itemize}
+    \item A priori: $\mathbf{x}_a = [0.5,\; 0.85,\; 0.5]^T$
+    \item Regularizaci\'on: $\gamma = 0.05$
+    \item L\'imites f\'isicos: $\text{AOD}\in[0.01, 3.0]$,
+          $\omega_0\in[0.5, 0.9999]$, $g\in[0.0, 0.999]$
+    \item Guess inicial: $\mathbf{x}_0 = [0.2,\; 0.90,\; 0.60]^T$
+\end{itemize}
+
+\paragraph{Optimal Estimation}
+\begin{itemize}
+    \item A priori: $\mathbf{x}_a = [0.5,\; 0.85,\; 0.5]^T$
+    \item Covarianza a priori: $\mathbf{S}_a = \text{diag}(0.3^2,\; 0.1^2,\; 0.2^2)
+          = \text{diag}(0.09,\; 0.01,\; 0.04)$
+    \item Covarianza del error: $\mathbf{S}_\epsilon = (\sigma)^2\,\mathbf{I}_m$
+          con $\sigma = 0.02\,\bar{y}$
+    \item M\'aximo 20 iteraciones, convergencia Mahalanobis $< 0.1$
+    \item Amortiguamiento LM: $\gamma_{\text{LM}} = 10$
+\end{itemize}
+
+\paragraph{Phillips--Twomey (demostraci\'on)}
+Se ejecuta la L-curve con $\gamma \in [10^{-4}, 10^2]$ (30 puntos
+logar\'itmicamente espaciados) usando el Jacobiano $\mathbf{K}$ de la
+\'ultima iteraci\'on de OE, con restricci\'on de orden 2.
+
+\subsection{Extensi\'on Multi-longitud de Onda}
+
+El modelo tambi\'en genera radiancias TOA a m\'ultiples longitudes de onda
+$\lambda \in \{440, 550, 670, 870\}$\,nm para caracterizar la dependencia
+espectral. Para cada $\lambda$:
+\begin{enumerate}
+    \item Se recalculan las propiedades de Mie: $\omega_{\text{aer}}(\lambda)$,
+          $g_{\text{aer}}(\lambda)$.
+    \item Se recalcula $\tau_{\text{Ray},k}(\lambda) \propto \lambda^{-4.04}$.
+    \item Se mantiene el mismo AOD total (referencia a 550\,nm).
+    \item Se resuelve el problema directo independientemente.
+\end{enumerate}
+
+Esto permite visualizar c\'omo la dispersi\'on de Rayleigh domina en longitudes
+de onda cortas ($\tau_{\text{Ray}} \gg \tau_{\text{aer}}$ a 440\,nm) mientras
+que el aerosol domina a longitudes de onda largas (870\,nm).
+
+\begin{table}[H]
+\centering
+\small
+\caption{Par\'ametros espec\'ificos del Nivel 2.}\label{tab:level2_params}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Par\'ametro} & \textbf{S\'imbolo/Variable} & \textbf{Valor} \\ \midrule
+Tipo de aerosol & \texttt{L2\_AEROSOL\_TYPE} & continental \\
+Longitud de onda & $\lambda$ & 550\,nm \\
+AOD total & $\tau_{\text{total}}$ & 0.3 \\
+Altura de escala & $H_{\text{aer}}$ & 2.0\,km \\
+N\'um.\ streams & $N$ & 36 \\
+N\'um.\ capas & $K$ & 20 \\
+\'Angulo cenital solar & $\theta_0$ & 30° \\
+Albedo de superficie & $A_s$ & 0.1 \\
+Flujo solar & $F_0$ & $\pi$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{Inversi\'on LM + Tikhonov}} \\
+A priori & $\mathbf{x}_a$ & $[0.5,\; 0.85,\; 0.5]^T$ \\
+Regularizaci\'on & $\gamma$ & 0.05 \\
+L\'imites inf. & --- & $[0.01,\; 0.5,\; 0.0]$ \\
+L\'imites sup. & --- & $[3.0,\; 0.9999,\; 0.999]$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{Inversi\'on OE}} \\
+A priori & $\mathbf{x}_a$ & $[0.5,\; 0.85,\; 0.5]^T$ \\
+Covarianza a priori & $\mathbf{S}_a$ & diag$(0.09,\; 0.01,\; 0.04)$ \\
+Ruido relativo & $\delta$ & 0.02 (2\%) \\
+Amortiguamiento LM & $\gamma_{\text{LM}}$ & 10 \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{Phillips--Twomey}} \\
+Orden de restricci\'on & --- & 2 (segunda derivada) \\
+Rango L-curve & $\gamma$ & $[10^{-4},\; 10^{2}]$ (30 pts) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ======================================================================
+\section{Estudio de Recuperaci\'on de 3 Par\'ametros}\label{sec:retrieval_study}
+% ======================================================================
+
+Para evaluar la capacidad del sistema de inversi\'on, se realiz\'o un estudio
+sistem\'atico de recuperaci\'on simult\'anea de los tres par\'ametros
+$\mathbf{x} = [\text{AOD},\,\omega_0,\,g]^T$ usando Optimal Estimation.
+
+\subsection{Dise\~no Experimental}
+
+Se definieron 20 combinaciones de par\'ametros verdaderos
+$(\tau_{\text{true}}, \omega_{0,\text{true}}, g_{\text{true}})$ que cubren
+el rango realista de aerosoles atmosf\'ericos:
+\begin{itemize}
+    \item AOD: $[0.05,\, 1.50]$ --- desde atm\'osfera limpia hasta tormenta de polvo.
+    \item SSA: $[0.78,\, 0.99]$ --- desde aerosol absorbente hasta casi conservativo.
+    \item $g$: $[0.55,\, 0.76]$ --- desde part\'iculas peque\~nas hasta polvo grueso.
+\end{itemize}
+
+Para cada caso $i$:
+\begin{enumerate}
+    \item Se genera la observaci\'on sint\'etica: $\mathbf{y}_i = F(\mathbf{x}_{i,\text{true}})$.
+    \item Se configura OE con a priori $\mathbf{x}_a = [0.5,\, 0.88,\, 0.65]^T$
+          y covarianzas $\mathbf{S}_a = \text{diag}(0.25, 0.0225, 0.0625)$,
+          $\mathbf{S}_\epsilon = \sigma^2 \mathbf{I}$ con $\sigma = 0.02\,\bar{y}$.
+    \item Se ejecuta la recuperaci\'on con amortiguamiento LM $\gamma = 0.05$.
+\end{enumerate}
+
+\subsection{Resultados}
+
+Los 20 casos convergieron exitosamente. Las m\'etricas de calidad son:
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Par\'ametro} & \textbf{RMSE} & \textbf{Sesgo} & \textbf{$R^2$ impl\'icito}\\ \midrule
+AOD ($\tau$) & 0.089 & $-0.020$ & Alto \\
+SSA ($\omega_0$) & 0.064 & $-0.023$ & Moderado \\
+$g$ (asimetr\'ia) & 0.043 & $-0.012$ & Moderado \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Los gr\'aficos de dispersi\'on (verdadero vs.\ recuperado) muestran que los puntos
+se agrupan cerca de la l\'inea 1:1, con mayor dispersi\'on en SSA y $g$ que en AOD.
+Esto es consistente con la teor\'ia: la radiancia TOA tiene mayor sensibilidad
+al espesor \'optico total que a los par\'ametros de dispersi\'on simple.
+
+
+% ======================================================================
+\section{Casos F\'isicos Extremos}\label{sec:extreme}
+% ======================================================================
+
+Para verificar el comportamiento del solver en condiciones l\'imite, se
+analizaron cuatro escenarios con $\text{AOD} = 0.5$ y $\theta_0 = 30°$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}clccll@{}}
+\toprule
+\textbf{Panel} & \textbf{Caso} & $\omega_0$ & $A_s$ &
+  \textbf{$R$ (TOA)} & \textbf{F\'isica esperada} \\ \midrule
+(a) & Sin absorci\'on  & 1.0 & 1.0 & 1.0000 & Toda la energ\'ia escapa \\
+(b) & Absorci\'on total & 0.0 & 0.0 & 0.0000 & Nada escapa \\
+(c) & Conservativo + negro & 1.0 & 0.0 & 0.0616 & Solo difusa escapa \\
+(d) & Absorbente + espejo & 0.0 & 1.0 & 0.2488 & Solo haz directo refleja \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keyresult}{Verificaci\'on de L\'imites F\'isicos}
+\begin{itemize}
+    \item Caso~(a): $R = 1$ confirma conservaci\'on perfecta de energ\'ia ---
+          sin absorci\'on en ning\'un lugar, todo el flujo incidente retorna al espacio.
+    \item Caso~(b): $R = 0$ confirma que la combinaci\'on $\omega_0 = 0$ (atm\'osfera
+          puramente absorbente) y $A_s = 0$ (superficie negra) elimina toda radiaci\'on.
+    \item Caso~(c): Con $\omega_0 = 1$, $F_{\text{abs,atm}} = 0$ exactamente,
+          verificando que la atm\'osfera no absorbe energ\'ia bajo dispersi\'on conservativa.
+    \item Caso~(d): $R = 0.249$ porque el haz directo se aten\'ua a
+          $e^{-\tau/\mu_0} = e^{-0.5/0.866} = 0.561$ al descender, y luego se aten\'ua
+          nuevamente al ascender despu\'es de reflejarse en la superficie.
+\end{itemize}
+\end{keyresult}
+
+
+% ======================================================================
+\section{Balance de Energ\'ia}\label{sec:energy_balance}
+% ======================================================================
+
+El balance de energ\'ia para el sistema atm\'osfera--superficie se descompone como:
+\begin{equation}\label{eq:energy_balance}
+    \boxed{F_{\text{in}} = F_\uparrow^{\text{TOA}} + F_{\text{abs,sfc}} + F_{\text{abs,atm}}}
+\end{equation}
+
+donde:
+\begin{align}
+    F_{\text{in}} &= F_0\,\mu_0 & &\text{(flujo solar incidente)} \\
+    F_\uparrow^{\text{TOA}} &= 2\pi\sum_i w_i\,\mu_i\,|I_i^{\text{TOA}}|
+        & &\text{(flujo que escapa al espacio)} \\
+    F_{\text{abs,sfc}} &= (1-A_s)\left(F_{\downarrow}^{\text{diff}} + F_{\text{dir}}\right)
+        & &\text{(absorbido por la superficie)} \\
+    F_{\text{abs,atm}} &= F_{\text{in}} - F_\uparrow^{\text{TOA}} - F_{\text{abs,sfc}}
+        & &\text{(absorbido por la atm\'osfera)}
+\end{align}
+
+Se verific\'o esta descomposici\'on en 13 escenarios (barrido de SSA a albedo fijo,
+barrido de albedo a SSA fijo, m\'as los 4 casos extremos). El gr\'afico de barras
+apiladas muestra que la suma de los tres componentes iguala $F_{\text{in}}$ en todos
+los casos, con error m\'aximo $|F_{\text{total}} - F_{\text{in}}| = 0$.
+
+
+% ======================================================================
+\section{Comparaci\'on con Datos AERONET}\label{sec:aeronet}
+% ======================================================================
+
+Para validar el modelo contra datos reales, se descargaron observaciones de la
+red AERONET (AErosol RObotic NETwork, Holben et al., 1998) del sitio GSFC
+(Goddard Space Flight Center, Maryland, EE.UU.) para el per\'iodo
+junio--agosto 2023.
+
+\subsection{Datos Utilizados}
+
+\begin{itemize}
+    \item \textbf{AOD Level 2.0} (promedios diarios): 87 registros con AOD
+          a 440\,nm en el rango $[0.057,\, 2.193]$, media $\bar{\tau} = 0.446$.
+    \item \textbf{Inversi\'on SSA} (Almucantar Level 2.0): 25 d\'ias con SSA v\'alido
+          a 440\,nm en $[0.920,\, 0.966]$.
+    \item \textbf{Inversi\'on Asymmetry Factor-Total}: par\'ametro de asimetr\'ia $g$
+          a 440\,nm en $[0.661,\, 0.743]$.
+\end{itemize}
+
+\subsection{Metodolog\'ia de Simulaci\'on}
+
+Para cada d\'ia con datos de AOD v\'alidos:
+\begin{enumerate}
+    \item Se construye un perfil de 1 capa: \texttt{AtmosphereProfile(aod=$\tau_{440}$,
+          ssa=$\omega_{0,440}$, g=$g_{440}$, albedo=$A_s$, theta0=$\theta_0$)}.
+    \item Si el d\'ia tiene datos de inversi\'on AERONET (SSA y $g$), se usan esos valores;
+          si no, se usan valores por defecto ($\omega_0 = 0.92$, $g = 0.70$).
+    \item Se ejecuta el solver DISORT y se computa la reflectancia TOA:
+          $R = F_\uparrow^{\text{TOA}} / (F_0\,\mu_0)$.
+\end{enumerate}
+
+\subsection{Resultados}
+
+Se simularon 87 d\'ias con \'exito. Los gr\'aficos de comparaci\'on muestran:
+\begin{itemize}
+    \item \textbf{AOD vs.\ $R$ simulado}: Relaci\'on positiva creciente ---
+          a mayor carga de aerosol, mayor reflectancia TOA. Los puntos coloreados
+          por SSA muestran que aerosoles m\'as absorbentes (SSA bajo) producen
+          menor $R$ a igual AOD.
+    \item \textbf{Serie temporal}: Las variaciones de AOD y $R$ simulado
+          est\'an fuertemente correlacionadas, con eventos de alta carga
+          (posiblemente transporte de humo de incendios canadienses en junio 2023)
+          claramente visibles.
+\end{itemize}
+
+
+% ======================================================================
+\section{Nivel 3: Recuperaci\'on de AOD con Datos Reales SURFRAD}
+\label{sec:surfrad}
+% ======================================================================
+
+El Nivel~3 cierra el ciclo problema directo $\to$ inverso utilizando
+\textbf{datos observacionales reales} para la recuperaci\'on del AOD.  Se
+combinan dos redes de medici\'on:
+\begin{itemize}
+    \item \textbf{AERONET} (Holben et al., 1998): proporciona los par\'ametros
+          \'opticos del aerosol (AOD, SSA, $g$) como verdad de referencia.
+    \item \textbf{SURFRAD} (Augustine et al., 2000): proporciona flujos de
+          radiaci\'on de banda ancha medidos en superficie.
+\end{itemize}
+
+\subsection{Datos SURFRAD}
+
+La red SURFRAD (Surface Radiation Budget Network) opera estaciones en EE.UU.\
+que miden flujos radiativos de banda ancha con piranometros y pirheliometros:
+\begin{itemize}
+    \item $\text{GHI}$ --- Global Horizontal Irradiance [W\,m$^{-2}$]:
+          flujo total hemisf\'erico descendente.
+    \item $\text{DNI}$ --- Direct Normal Irradiance [W\,m$^{-2}$]:
+          flujo del haz directo normal al sol.
+    \item $\text{DHI}$ --- Diffuse Horizontal Irradiance [W\,m$^{-2}$]:
+          flujo difuso hemisf\'erico ($\text{GHI} - \text{DNI}\cos\theta_0$).
+\end{itemize}
+
+\begin{physics}{SURFRAD mide flujos, no radiancias angulares}
+Es importante notar que los piranometros integran la radiaci\'on sobre todo el
+hemisferio (con ponderaci\'on coseno), produciendo un \'unico valor escalar de
+flujo.  No proporcionan informaci\'on sobre la distribuci\'on angular de la
+radiancia.  Para visualizar campos de radiancia angulares, se simulan con DISORT
+usando par\'ametros AERONET reales.
+\end{physics}
+
+\subsection{Observable: Fracci\'on Difusa}
+
+El observable para la recuperaci\'on es la \textbf{fracci\'on difusa}:
+\begin{equation}\label{eq:diff_frac}
+    \boxed{f_d = \frac{\text{DHI}}{\text{GHI}}}
+\end{equation}
+
+$f_d$ tiene la ventaja de ser un cociente adimensional que es robusto frente a
+errores de calibraci\'on absoluta y depende fuertemente del AOD:
+\begin{itemize}
+    \item AOD bajo $\to$ $f_d$ peque\~na (la mayor\'ia de la radiaci\'on es directa).
+    \item AOD alto $\to$ $f_d$ grande (la radiaci\'on directa se aten\'ua y la
+          difusa aumenta por dispersi\'on m\'ultiple).
+\end{itemize}
+
+La relaci\'on $f_d(\tau)$ es \textbf{mon\'otona creciente} para par\'ametros
+de dispersi\'on fijos ($\omega_0$, $g$), lo que garantiza unicidad de la
+soluci\'on y permite el uso de bisecci\'on.
+
+\subsection{Modelo de Banda Ancha: 3 Longitudes de Onda}
+
+Los instrumentos SURFRAD miden la radiaci\'on integrada sobre un rango espectral
+amplio (aproximadamente 300--3000\,nm).  Para modelar este flujo de banda ancha
+con nuestro solver monocrom\'atico, se utiliza un \textbf{modelo de 3 bandas}:
+
+\begin{center}
+\begin{tabular}{@{}cccc@{}}
+\toprule
+\textbf{Banda} & $\lambda_c$ (nm) & $F_{\text{solar}}$ (W\,m$^{-2}$\,nm$^{-1}$)
+& $\Delta\lambda$ (nm) \\ \midrule
+VIS  & 400 & 1.60 & 150 \\
+VIS  & 550 & 1.88 & 200 \\
+NIR  & 800 & 1.14 & 350 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+El AOD se escala espectralmente usando el exponente de \AA ngstr\"om
+$\alpha$ (derivado de AERONET):
+\begin{equation}\label{eq:angstrom}
+    \tau(\lambda) = \tau_{550}\left(\frac{\lambda}{550}\right)^{-\alpha}
+\end{equation}
+
+Para cada banda, se ejecuta DISORT por separado y se combinan los flujos
+ponderados por la irradiancia solar y el ancho de banda:
+\begin{align}
+    F_{\text{dir,BB}} &= \sum_{b=1}^{3} F_{\text{solar},b}\,\Delta\lambda_b\,
+    \cos\theta_0\,e^{-\tau_b/\cos\theta_0}\\
+    F_{\text{diff,BB}} &= \sum_{b=1}^{3} F_{\text{solar},b}\,\Delta\lambda_b\,
+    F_{\downarrow,\text{diff}}^{(b)}
+\end{align}
+
+donde $F_{\downarrow,\text{diff}}^{(b)}$ es el flujo difuso descendente
+calculado por DISORT para la banda $b$.
+
+\subsection{Algoritmo de Recuperaci\'on: Bisecci\'on}
+
+Dado que $f_d(\tau)$ es mon\'otona, se utiliza el m\'etodo de bisecci\'on para
+encontrar el AOD que reproduce la fracci\'on difusa observada:
+
+\begin{enumerate}
+    \item Se calcula $f_d^{\text{obs}} = \text{DHI}^{\text{obs}} / \text{GHI}^{\text{obs}}$.
+    \item Se define el intervalo de b\'usqueda $\tau \in [0.001, 5.0]$.
+    \item En cada iteraci\'on, se eval\'ua $f_d^{\text{model}}(\tau_{\text{mid}})$
+          usando el modelo de 3 bandas.
+    \item Se actualiza el intervalo seg\'un el signo de
+          $f_d^{\text{model}} - f_d^{\text{obs}}$.
+    \item Se itera hasta $|\tau_{\text{hi}} - \tau_{\text{lo}}| < 10^{-4}$.
+\end{enumerate}
+
+\begin{concept}{Ventajas de la bisecci\'on sobre LM/OE}
+\begin{itemize}
+    \item \textbf{Sin regularizaci\'on}: no hay sesgo hacia un a priori
+          $\mathbf{x}_a$, eliminando el bias sistem\'atico observado en el
+          Nivel~1 con LM+Tikhonov.
+    \item \textbf{Convergencia garantizada}: la monoton\'ia de $f_d(\tau)$
+          asegura convergencia a la soluci\'on \'unica.
+    \item \textbf{1D}: con un solo par\'ametro a recuperar (AOD), la
+          bisecci\'on es m\'as eficiente que m\'etodos iterativos generales.
+\end{itemize}
+\end{concept}
+
+\subsection{Colocaci\'on AERONET--SURFRAD}
+
+Para la validaci\'on, se utiliza la estaci\'on SURFRAD de \textbf{Bondville}
+(Illinois, 40.05°N, 88.37°W), colocada con el sitio AERONET
+\textbf{BONDVILLE}.  Los datos se filtran para condiciones de cielo despejado:
+\begin{itemize}
+    \item QC flag = 0 (calidad \'optima)
+    \item DNI $> 100$ W\,m$^{-2}$ (cielo despejado, sin nubes gruesas)
+    \item Horario de mediod\'ia ($\pm 3$ horas del mediod\'ia solar)
+    \item Colocalidad temporal: datos de AERONET del mismo d\'ia proporcionan
+          los valores de SSA y $g$ necesarios para el modelo
+\end{itemize}
+
+\subsection{Resultados del Nivel 3}
+
+La recuperaci\'on de AOD por fracci\'on difusa produce:
+\begin{itemize}
+    \item $R^2 \approx 0.99$ contra el AOD de AERONET (verdad de referencia)
+    \item Sesgo bajo, sin la saturaci\'on observada en inversiones de radiancia
+    \item El alto $R^2$ se explica porque:
+    \begin{enumerate}
+        \item La bisecci\'on no tiene sesgo de regularizaci\'on.
+        \item La fracci\'on difusa es mon\'otona en AOD (mapeo 1:1).
+        \item Los par\'ametros de dispersi\'on (SSA, $g$) se toman de AERONET,
+              eliminando la degeneraci\'on AOD--SSA que limita la precisi\'on
+              en inversiones de radiancia angular (Secci\'on~\ref{sec:interp_coupling}).
+    \end{enumerate}
+\end{itemize}
+
+\subsection{Simulaci\'on del Campo de Radiancia con Datos Reales}
+
+Para visualizar c\'omo se ver\'ia el campo de radiancia angular bajo condiciones
+atmosf\'ericas reales (algo que SURFRAD no mide), se seleccionan 5 d\'ias
+representativos del dataset AERONET que cubren el rango de AOD observado
+(m\'inimo, percentil 25, mediana, percentil 75, m\'aximo) y se simula con
+DISORT usando la interpolaci\'on continua (Ecs.~35a,b) en una malla fina de
+$1°$ a $89°$:
+\begin{equation}
+    I^{\text{sim}}(\theta) = I^{\text{DISORT}}(\cos\theta;\,
+    \tau^{\text{AERONET}}, \omega_0^{\text{AERONET}}, g^{\text{AERONET}})
+    \qquad \theta \in [1°, 89°]
+\end{equation}
+
+Esto muestra la transici\'on gradual de campos de radiancia suaves (AOD bajo)
+a campos m\'as isotr\'opicos (AOD alto) debido al aumento de la dispersi\'on
+m\'ultiple.
+
+
+% ======================================================================
+\section{Comparaci\'on de M\'etodos: LM+Tikhonov vs.\ Optimal Estimation}
+\label{sec:lm_vs_oe}
+% ======================================================================
+
+Se implement\'o una comparaci\'on sistem\'atica entre los dos m\'etodos
+iterativos principales:
+
+\subsection{Diferencias Fundamentales}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Aspecto} & \textbf{LM + Tikhonov} & \textbf{Optimal Estimation} \\ \midrule
+Regularizaci\'on & $\gamma\|\mathbf{x}-\mathbf{x}_a\|^2$ (escalar) &
+    $(\mathbf{x}-\mathbf{x}_a)^T\mathbf{S}_a^{-1}(\mathbf{x}-\mathbf{x}_a)$
+    (matricial) \\
+Ponderaci\'on datos & Uniforme ($\|\mathbf{r}\|^2$) &
+    $\mathbf{S}_\epsilon^{-1}$ (covarianza de error) \\
+Diagn\'osticos & Solo $\mathbf{x}$ y costo & $\hat{\mathbf{S}}$,
+    $\mathbf{A}$, DFS, $\mathbf{G}$, $\mathbf{K}$ \\
+Implementaci\'on & \texttt{scipy.optimize.least\_squares} &
+    Gauss--Newton propio \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Resultados Comparativos}
+
+En los niveles 1 y 2, OE generalmente produce recuperaciones m\'as precisas
+que LM+Tikhonov, especialmente para AOD extremos, porque:
+\begin{enumerate}
+    \item La ponderaci\'on por $\mathbf{S}_\epsilon^{-1}$ da m\'as peso a
+          mediciones con menor error.
+    \item La covarianza a priori $\mathbf{S}_a$ permite especificar
+          incertidumbres \emph{por par\'ametro}, en lugar de un \'unico
+          $\gamma$ global.
+    \item El DFS indica cu\'anta informaci\'on proviene de los datos vs.\ del
+          a priori, guiando la interpretaci\'on del resultado.
+\end{enumerate}
+
+
+% ======================================================================
+\part{Interpretaci\'on de Resultados}
+% ======================================================================
+
+% ======================================================================
+\section{M\'aximos de Radiancia TOA cerca de VZA $\approx 90°$}
+\label{sec:interp_vza}
+% ======================================================================
+
+\subsection{Origen Matem\'atico}
+
+La radiancia TOA ascendente viene dada por la Ec.~\eqref{eq:I_toa}:
+\[
+I_i^{\text{TOA}} = \sum_{j=1}^{N}\hat{C}_{1,j}\,E^{(1)}_{ij}\,f_j(0)
++ Z_{p,i}^{(1)}
+\]
+
+El t\'ermino dominante para streams con $\mu_i \approx 0$ (VZA $\to 90°$) proviene
+de la \textbf{soluci\'on particular} y la estructura de la matriz $\mathbf{A}$:
+
+\begin{equation}\label{eq:A_mu_dependence}
+    A_{ii} = \frac{1}{\mu_i}\left(1 - \frac{\omega_0}{2}\,w_i\,P_{ii}\right)
+\end{equation}
+
+Cuando $|\mu_i| \to 0$, $A_{ii} \to \pm\infty$. Esto tiene una interpretaci\'on
+f\'isica directa.
+
+\subsection{Interpretaci\'on F\'isica: El Efecto del Camino \'Optico}
+
+Un fot\'on que se propaga con \'angulo cenital $\theta$ recorre un camino \'optico
+\emph{oblicuo} por cada incremento vertical $d\tau$:
+\begin{equation}
+    ds = \frac{d\tau}{\mu} = \frac{d\tau}{\cos\theta}
+\end{equation}
+
+Para VZA $\to 90°$, $\mu \to 0$ y $ds \to \infty$: el fot\'on atraviesa un
+camino \'optico \textbf{infinitamente largo} por unidad de $\Delta\tau$ vertical.
+Esto tiene dos consecuencias:
+
+\begin{enumerate}
+    \item \textbf{Mayor probabilidad de interacci\'on}: Cada fot\'on dispersado
+          hacia \'angulos rasantes ha interactuado muchas veces con el medio,
+          acumulando contribuciones de dispersi\'on m\'ultiple.
+
+    \item \textbf{Convergencia de contribuciones}: La radiancia integra sobre
+          todas las fuentes de scattering a lo largo del camino oblicuo. Para
+          \'angulos rasantes, este camino cruza pr\'acticamente toda la atm\'osfera
+          horizontalmente, recogiendo contribuciones de un volumen grande.
+\end{enumerate}
+
+Matem\'aticamente, la soluci\'on particular satisface:
+\begin{equation}
+    \left(\mathbf{A} + \frac{1}{\mu_0}\,\mathbf{I}\right)\mathbf{Z}_p
+    = -\mathbf{M}^{-1}\mathbf{Q}
+\end{equation}
+
+Para la fila $i$ con $\mu_i$ peque\~no:
+\begin{equation}
+    Z_{p,i} \propto \frac{Q_i / \mu_i}{1/\mu_i + 1/\mu_0}
+    = \frac{Q_i}{\mu_i} \cdot \frac{\mu_0}{\mu_0 + \mu_i}
+    \xrightarrow{\mu_i \to 0} \frac{Q_i}{\mu_i}
+\end{equation}
+
+El t\'ermino $Q_i/\mu_i$ \textbf{diverge} para $\mu_i \to 0$, lo que explica el
+crecimiento de la radiancia hacia \'angulos rasantes. F\'isicamente, esto se
+interpreta como la \emph{masa de aire} (air mass factor) $1/\mu$ que amplifica
+la fuente de scattering.
+
+\begin{physics}{An\'alogo con la Ley de Beer--Lambert}
+La ley de Beer--Lambert para un camino oblicuo es
+$I = I_0\,e^{-\tau/\mu}$.  Cuando $\mu \to 0$, la \emph{atenuaci\'on}
+tambi\'en se hace infinita.  La competencia entre la mayor fuente de scattering
+($\propto 1/\mu$) y la mayor atenuaci\'on ($\propto e^{-\tau/\mu}$) produce un
+m\'aximo en la radiancia TOA a VZA alto pero finito (t\'ipicamente $70°$--$85°$),
+seguido de un decaimiento cuando la atenuaci\'on domina.
+\end{physics}
+
+
+% ======================================================================
+\section{No Linealidad en la Recuperaci\'on del AOD (Nivel 1)}
+\label{sec:interp_nonlinear}
+% ======================================================================
+
+\subsection{El Modelo Directo es Intr\'insecamente No Lineal}
+
+La relaci\'on entre AOD y radiancia TOA no es lineal. Esto se demuestra
+expandiendo la dependencia funcional:
+
+\begin{equation}
+    I^{\text{TOA}}(\tau) = \sum_j C_j(\tau)\,E_{ij}\,e^{-\lambda_j(\tau)\cdot 0}
+    + Z_{p,i}(\tau)
+\end{equation}
+
+donde $C_j$, $\lambda_j$ y $Z_{p,i}$ \textbf{todos} dependen de $\tau$ de
+manera no lineal:
+
+\begin{enumerate}
+    \item \textbf{Eigenvalores $\lambda_j(\tau)$}: Provienen de la
+          eigendescomposici\'on de $\mathbf{A} = \mathbf{M}^{-1}(\mathbf{I} -
+          \frac{\omega_0}{2}\mathbf{P}\mathbf{W})$.  Aunque $\mathbf{A}$ no
+          depende expl\'icitamente de $\tau$ dentro de una capa, los eigenvalores
+          var\'ian con el delta-M scaling: $\tau' = \tau(1 - \omega_0 f)$, y los
+          escalados $\omega_0'$ y $g'$ cambian si se modifica la composici\'on.
+
+    \item \textbf{Constantes de integraci\'on $C_j(\tau)$}: Las condiciones de
+          frontera involucran exponenciales $e^{-\lambda_j\Delta\tau}$ y el
+          t\'ermino de superficie $e^{-\tau_{\text{total}}/\mu_0}$, ambos
+          funciones no lineales de $\tau$.
+
+    \item \textbf{Soluci\'on particular $Z_{p,i}(\tau)$}: Depende del vector
+          fuente $\mathbf{Q}$ que escala con $\omega_0$ y $F_0$, y es
+          modulado por $e^{-\tau/\mu_0}$ en las condiciones de frontera.
+\end{enumerate}
+
+\subsection{Consecuencia para el Problema Inverso}
+
+El Jacobiano $K_{ij} = \partial y_i / \partial x_j$ var\'ia con el punto
+de evaluaci\'on $\mathbf{x}$, requiriendo una actualizaci\'on iterativa:
+
+\begin{equation}
+    \mathbf{x}_{n+1} = \mathbf{x}_a + \mathbf{G}_n
+    \left[\mathbf{y}_{\text{obs}} - F(\mathbf{x}_n) +
+    \mathbf{K}_n(\mathbf{x}_n - \mathbf{x}_a)\right]
+\end{equation}
+
+Si la relaci\'on fuera lineal ($F(\mathbf{x}) = \mathbf{K}\mathbf{x} + \mathbf{b}$),
+una sola iteraci\'on bastar\'ia.  La necesidad de m\'ultiples iteraciones
+(t\'ipicamente 3--10) evidencia la no linealidad.
+
+\subsection{Manifestaci\'on en los Gr\'aficos de AOD vs.\ $R$}
+
+En el gr\'afico de dispersi\'on AOD vs.\ reflectancia $R$, se observa:
+\begin{itemize}
+    \item Para AOD bajo ($\tau < 0.2$): crecimiento aproximadamente lineal.
+          La atm\'osfera es \'opticamente delgada y la radiancia escala como
+          $I \propto \omega_0\,\tau\,P(\mu,\mu_0)/(4\pi\mu)$.
+
+    \item Para AOD moderado ($0.2 < \tau < 1$): la relaci\'on se curva hacia
+          arriba por dispersi\'on m\'ultiple acumulada.
+
+    \item Para AOD alto ($\tau > 1$): \textbf{saturaci\'on} --- la radiancia
+          crece cada vez m\'as lentamente porque la atenuaci\'on del haz directo
+          ($e^{-\tau/\mu_0}$) domina sobre la ganancia por scattering.
+\end{itemize}
+
+\begin{concept}{Saturaci\'on de la Radiancia}
+La saturaci\'on ocurre porque al aumentar $\tau$, se cumplen simult\'aneamente:
+\begin{itemize}
+    \item M\'as part\'iculas dispersan luz $\to$ m\'as fuente de radiancia.
+    \item M\'as part\'iculas aten\'uan la luz $\to$ menos fotones llegan a cada
+          part\'icula y menos escapan al TOA.
+\end{itemize}
+El resultado neto es una funci\'on c\'oncava que eventualmente satura en un
+valor l\'imite que depende de $\omega_0$, $g$ y $A_s$.
+\end{concept}
+
+
+% ======================================================================
+\section{Acoplamiento entre Par\'ametros Recuperados}
+\label{sec:interp_coupling}
+% ======================================================================
+
+El estudio de recuperaci\'on de 3 par\'ametros revela que el SSA y $g$ tienen
+mayor incertidumbre que el AOD.  Esto se explica por el \textbf{acoplamiento
+parcial} entre estos par\'ametros en la se\~nal de radiancia:
+
+\subsection{Degeneraci\'on AOD--SSA}
+
+Considerar dos configuraciones:
+\begin{align}
+    \text{(A)} &\quad \tau = 0.5,\; \omega_0 = 0.9 \implies \tau_{\text{scat}} = 0.45 \\
+    \text{(B)} &\quad \tau = 0.45,\; \omega_0 = 1.0 \implies \tau_{\text{scat}} = 0.45
+\end{align}
+
+Ambas producen el mismo espesor \'optico de dispersi\'on $\tau_{\text{scat}} =
+\omega_0\,\tau$, por lo que generan radiancias similares en dispersi\'on simple.
+La diferencia aparece solo en ordenes superiores de dispersi\'on, donde (A) pierde
+fotones por absorci\'on en cada evento.
+
+El Jacobiano captura esto: $\partial I / \partial\omega_0$ y
+$\partial I / \partial\tau$ tienen perfiles angulares similares (ambos afectan
+la magnitud total de la radiancia), lo que produce una alta correlaci\'on
+en la covarianza posterior $\hat{\mathbf{S}}$.
+
+\subsection{Degeneraci\'on SSA--$g$}
+
+Un aumento en $g$ concentra la dispersi\'on en la direcci\'on frontal, reduciendo
+la radiancia lateral y de retrodispersi\'on.  Un aumento simult\'aneo en $\omega_0$
+incrementa el n\'umero total de eventos de scattering, compensando parcialmente.
+El averaging kernel $\mathbf{A}$ t\'ipicamente muestra DFS $\approx 2.5$--$2.8$
+para 3 par\'ametros, indicando que la informaci\'on observacional no es suficiente
+para resolver completamente los tres par\'ametros de forma independiente.
+
+
+% ======================================================================
+\section{Modelamiento para la Comparaci\'on AERONET}
+\label{sec:interp_aeronet}
+% ======================================================================
+
+\subsection{Cadena de Simulaci\'on}
+
+La comparaci\'on con datos AERONET sigue la cadena:
+
+\begin{equation*}
+    \underbrace{\tau_{440}^{\text{AERONET}},\;
+    \omega_{0,440}^{\text{AERONET}},\;
+    g_{440}^{\text{AERONET}}}_{\text{Datos observados}}
+    \xrightarrow{\text{AtmosphereProfile}}
+    \underbrace{(\tau, \omega_0, g, A_s, \theta_0)}_{\text{Perfil de 1 capa}}
+    \xrightarrow{\text{DISORT}}
+    \underbrace{R = F_\uparrow / F_{\text{in}}}_{\text{Reflectancia simulada}}
+\end{equation*}
+
+Este enfoque es \textbf{forward modeling}: no se recuperan par\'ametros, sino que
+se usan los par\'ametros medidos por AERONET como entrada al modelo directo para
+predecir qu\'e reflectancia TOA observar\'ia un sat\'elite.
+
+\subsection{Hip\'otesis y Limitaciones}
+
+\begin{enumerate}
+    \item \textbf{Atm\'osfera de 1 capa}: Se modela toda la columna atmosf\'erica
+          como una capa homog\'enea, ignorando el perfil vertical real.  Esto es
+          una aproximaci\'on razonable para AOD total pero pierde informaci\'on
+          sobre la distribuci\'on vertical del aerosol.
+
+    \item \textbf{Superficie Lambertiana con $A_s = 0.1$}: AERONET no reporta
+          albedo de superficie.  El valor $0.1$ es representativo de vegetaci\'on
+          en el visible pero no se ajusta por d\'ia o estaci\'on.
+
+    \item \textbf{Datos faltantes}: Solo 16 de los 87 d\'ias de AOD tienen datos
+          simultan\'eos de SSA y $g$ de inversi\'on AERONET.  Para los d\'ias sin
+          inversi\'on, se usan valores por defecto ($\omega_0 = 0.92$, $g = 0.70$),
+          introduciendo incertidumbre adicional.
+
+    \item \textbf{Monocrom\'atico a 440\,nm}: Se usa una sola longitud de onda.
+          En realidad, los sat\'elites observan en m\'ultiples bandas.
+\end{enumerate}
+
+\subsection{Interpretaci\'on de la Relaci\'on AOD--$R$}
+
+La relaci\'on observada entre AOD y $R$ simulado confirma el comportamiento
+f\'isico esperado:
+
+\begin{equation}
+    R(\tau) \approx R_0 + \frac{\omega_0\,\bar{P}}{4}\left(1 - e^{-c\,\tau}\right)
+    \qquad \text{(aproximaci\'on emp\'irica)}
+\end{equation}
+
+donde $R_0 = A_s\,e^{-2\tau/\mu_0}$ es la contribuci\'on de superficie (que decrece
+con $\tau$), $\bar{P}$ es un promedio efectivo de la funci\'on de fase, y $c$ es una
+constante que depende de la geometr\'ia.  La competencia entre estos t\'erminos
+produce:
+\begin{itemize}
+    \item $R$ creciente con $\tau$ para AOD bajo (domina el scattering).
+    \item Curvatura y eventual saturaci\'on para AOD alto.
+    \item Dependencia del color de los puntos (SSA) confirma que aerosoles
+          m\'as absorbentes producen menor $R$.
+\end{itemize}
+
+
+% ======================================================================
+\section{Balance Energ\'etico: Verificaci\'on de Consistencia}
+\label{sec:interp_energy}
+% ======================================================================
+
+La Ec.~\eqref{eq:energy_balance} proporciona una verificaci\'on fundamental del
+solver.  El an\'alisis revela comportamientos f\'isicos coherentes:
+
+\subsection{Dependencia con SSA (a $A_s = 0.1$ fijo)}
+
+\begin{itemize}
+    \item $\omega_0 = 0$: $F_{\text{abs,atm}}$ es m\'aximo porque toda interacci\'on
+          con aerosol es absorci\'on pura.  $F_\uparrow^{\text{TOA}} \approx 0$ excepto
+          por la reflexi\'on de superficie del haz directo residual.
+
+    \item $\omega_0 = 1$: $F_{\text{abs,atm}} = 0$ exactamente.  Toda la energ\'ia se
+          redistribuye entre $F_\uparrow^{\text{TOA}}$ y $F_{\text{abs,sfc}}$.
+
+    \item Transici\'on: Al aumentar $\omega_0$ de 0 a 1, $F_{\text{abs,atm}}$ decrece
+          monotonamente y $F_\uparrow^{\text{TOA}}$ crece, reflejando la mayor eficiencia
+          de scattering hacia el espacio.
+\end{itemize}
+
+\subsection{Dependencia con Albedo de Superficie (a $\omega_0 = 0.9$ fijo)}
+
+\begin{itemize}
+    \item $A_s = 0$: La superficie absorbe todo el flujo descendente.
+          $F_{\text{abs,sfc}}$ es m\'aximo.
+
+    \item $A_s = 1$: La superficie no absorbe nada ($F_{\text{abs,sfc}} = 0$).
+          Toda la energ\'ia descendente es reflejada, contribuyendo a
+          $F_\uparrow^{\text{TOA}}$.
+
+    \item El flujo que escapa al espacio $F_\uparrow^{\text{TOA}}$ crece
+          r\'apidamente con $A_s$ porque la superficie act\'ua como una fuente
+          adicional de radiaci\'on ascendente.
+\end{itemize}
+
+
+% ======================================================================
+\section{Estudio Param\'etrico: Dependencias F\'isicas Clave}
+\label{sec:interp_param_study}
+% ======================================================================
+
+Los barridos param\'etricos sistem\'aticos revelan las siguientes dependencias:
+
+\subsection{Barrido de SSA ($\omega_0$)}
+
+La radiancia TOA crece monotonamente con $\omega_0$ porque:
+\begin{equation}
+    \frac{\partial I^{\text{TOA}}}{\partial\omega_0} > 0
+    \qquad \text{siempre}
+\end{equation}
+
+F\'isicamente, aumentar $\omega_0$ convierte absorci\'on en dispersi\'on,
+incrementando la probabilidad de que los fotones escapen hacia el sat\'elite.
+El efecto es m\'as pronunciado a AOD alto (m\'as interacciones por fot\'on).
+
+\subsection{Barrido de AOD ($\tau$)}
+
+La radiancia TOA crece con $\tau$ pero con tasa decreciente (curva c\'oncava):
+\begin{equation}
+    \frac{\partial I}{\partial\tau} > 0, \qquad
+    \frac{\partial^2 I}{\partial\tau^2} < 0
+    \qquad \text{(para $\tau$ moderado a alto)}
+\end{equation}
+
+La primera derivada positiva indica que m\'as aerosol produce m\'as scattering.
+La segunda derivada negativa indica saturaci\'on por atenuaci\'on competitiva.
+
+\subsection{Barrido de $g$ (Asimetr\'ia)}
+
+Aumentar $g$ reduce la radiancia en las direcciones de \emph{retrodispersi\'on}
+(backscatter) porque la dispersi\'on se concentra hacia adelante:
+\begin{equation}
+    P(\cos\Theta) = \frac{1-g^2}{(1+g^2-2g\cos\Theta)^{3/2}}
+    \xrightarrow{g \to 1} \delta(\cos\Theta - 1)
+\end{equation}
+
+Para un sat\'elite observando en la direcci\'on de retrodispersi\'on
+($\Theta \approx 180° - \theta_0$), la radiancia \emph{disminuye} con $g$.
+Para \'angulos de observaci\'on cercanos a forward scattering, la radiancia
+\emph{aumenta} con $g$.
+
+\subsection{Barrido de $\theta_0$ (\'Angulo Cenital Solar)}
+
+Al aumentar $\theta_0$ (sol m\'as bajo):
+\begin{equation}
+    F_{\text{in}} = F_0\cos\theta_0 \xrightarrow{\theta_0 \to 90°} 0
+\end{equation}
+
+El flujo incidente disminuye, pero simult\'aneamente:
+\begin{equation}
+    \text{camino \'optico oblicuo} = \frac{\tau}{\cos\theta_0}
+    \xrightarrow{\theta_0 \to 90°} \infty
+\end{equation}
+
+El primer efecto domina para la radiancia absoluta (que disminuye), pero la
+\emph{reflectancia} $R = F_\uparrow/(F_0\mu_0)$ puede aumentar porque los
+fotones tienen m\'as oportunidades de ser dispersados antes de escapar.
+
+
+% ======================================================================
+\section{Conclusiones}
+% ======================================================================
+
+En este trabajo se implement\'o desde cero un solver de ordenadas discretas
+para la ecuaci\'on de transferencia radiativa en atm\'osferas plano-paralelas,
+siguiendo la metodolog\'ia DISORT documentada por Stamnes et al.\ (2000).
+El modelo directo resuelve la RTE discretizada con cuadratura Double-Gauss,
+emplea la formulaci\'on reducida de autovalores $(N/2)\times(N/2)$ de
+Stamnes \& Swanson (1981) que garantiza autovalores reales por construcci\'on,
+e incorpora la estabilizaci\'on num\'erica de Stamnes \& Conklin (1984) y el
+escalamiento delta-M de Wiscombe (1977) para funciones de fase fuertemente
+asim\'etricas. Adem\'as, se implement\'o la integraci\'on de la funci\'on fuente
+(Ecs.~35a,b del reporte) que permite obtener intensidades en \'angulos
+arbitrarios sin estar restringidos a los nodos de cuadratura.
+
+La atm\'osfera se model\'o con la Est\'andar US-1976 de 20 capas, incluyendo
+dispersi\'on de Rayleigh y propiedades \'opticas de aerosol obtenidas
+mediante teor\'ia de Mie (Bohren \& Huffman, 1983) integrada sobre
+distribuciones lognormales de tama\~no. Se definieron cinco presets de
+aerosol (continental, urbano, mar\'itimo, polvo des\'ertico y quema de biomasa)
+y la distribuci\'on vertical se model\'o como un perfil exponencial con
+altura de escala $H = 2$\,km.
+
+Para el problema inverso se implementaron dos m\'etodos de regularizaci\'on:
+Tikhonov con Levenberg-Marquardt, que minimiza una funci\'on de costo
+regularizada mediante un residuo aumentado con el algoritmo Trust Region
+Reflective, y Optimal Estimation (Rodgers, 2000), que formula la inversi\'on
+en un marco bayesiano con iteraci\'on de Gauss-Newton y proporciona
+diagn\'osticos completos como la covarianza posterior, la averaging kernel
+y los grados de libertad por se\~nal (DFS). Ambos m\'etodos fueron validados
+en los Niveles~1 y~2 del modelo.
+
+El proyecto se estructur\'o en tres niveles de complejidad creciente.
+En el \textbf{Nivel~1} se trabaj\'o con una atm\'osfera de una sola capa
+y un \'unico par\'ametro a recuperar (AOD), lo que permiti\'o observar
+la relaci\'on no lineal entre el espesor \'optico y la radiancia TOA:
+a medida que el AOD aumenta, la reflectancia crece pero con tasa
+decreciente, de modo que la sensibilidad del observable disminuye
+en atm\'osferas \'opticamente gruesas. Se verific\'o que ambos m\'etodos
+de inversi\'on recuperan el AOD verdadero con error inferior a $0.01\%$
+en ausencia de ruido, y que con a priori d\'ebil ($\mathbf{S}_a$ grande)
+el resultado depende exclusivamente de los datos.
+
+En el \textbf{Nivel~2} se pas\'o a una atm\'osfera realista de 20 capas
+con aerosol continental a 550\,nm y 36 streams, donde se recuperaron
+simult\'aneamente los tres par\'ametros $\mathbf{x} = [\text{AOD},\,\omega_0,\,g]^T$.
+Se observ\'o que el AOD es el par\'ametro mejor recuperado, con
+RMSE $= 0.089$ sobre 20 escenarios de validaci\'on, mientras que SSA
+y $g$ presentan mayor incertidumbre (RMSE de 0.064 y 0.043
+respectivamente). Esto se debe a la degeneraci\'on entre $\omega_0$ y $g$:
+ambos controlan cu\'anta luz retorna hacia el sensor, de manera que un
+aumento en SSA puede ser parcialmente compensado por un aumento en $g$.
+La comparaci\'on entre LM+Tikhonov y Optimal Estimation mostr\'o que ambos
+convergen a soluciones pr\'acticamente id\'enticas, pero OE ofrece
+la ventaja de proporcionar barras de error formales y la averaging kernel
+que cuantifica la resoluci\'on de la inversi\'on.
+
+Los estudios param\'etricos permitieron observar el comportamiento f\'isico
+esperado en todos los casos: al aumentar $\omega_0$ la reflectancia crece
+porque m\'as fotones son dispersados en lugar de absorbidos; al aumentar
+$g$ la reflectancia disminuye porque la dispersi\'on se concentra hacia
+adelante y menos luz retorna al espacio; y al aumentar el albedo de
+superficie, la contribuci\'on del fondo se suma a la radiancia atmosf\'erica.
+Se verific\'o la conservaci\'on de energ\'ia exacta
+($F_{\text{in}} = F_\uparrow^{\text{TOA}} + F_{\text{abs,sfc}} + F_{\text{abs,atm}}$)
+en 13 escenarios, y se confirm\'o que los l\'imites f\'isicos extremos se
+reproducen correctamente: reflectancia $R = 1$ para dispersi\'on
+conservativa con superficie perfectamente reflectante, y $R = 0$ para
+absorci\'on total con superficie negra.
+
+Sin embargo, se identific\'o una limitaci\'on num\'erica importante: para
+par\'ametros de asimetr\'ia altos ($g \geq 0.9$), las radiancias presentan
+oscilaciones espurias causadas por la truncaci\'on de la expansi\'on de
+Legendre de la funci\'on de fase. A $g = 0.95$, la funci\'on de
+Henyey-Greenstein requiere aproximadamente 160 t\'erminos de Legendre para
+converger, pero el solver utiliza $l_{\max} = N = 36$ t\'erminos (ligado
+al n\'umero de streams). El escalamiento delta-M reduce la fracci\'on truncada
+pero el par\'ametro de asimetr\'ia escalado ($g' = 0.94$) sigue siendo alto,
+y las oscilaciones de tipo Gibbs persisten. Los flujos integrados no se
+ven afectados (la cuadratura promedia las oscilaciones), pero el campo
+angular s\'i las exhibe. La correcci\'on est\'andar para este problema
+(single-scatter correction de Nakajima \& Tanaka, 1988) no fue implementada.
+
+En el \textbf{Nivel~3} se trabaj\'o con datos reales de la estaci\'on
+SURFRAD Bondville, que mide irradiancias de banda ancha en superficie
+(GHI, DNI, DHI) con piranómetros. La idea central fue explotar la
+fracci\'on difusa $d_f = \text{DHI}/\text{GHI}$ como observable: en
+cielo despejado, la fracci\'on difusa aumenta con el AOD porque m\'as
+fotones son dispersados por los aerosoles antes de llegar al suelo.
+Se construy\'o un modelo de 3 bandas (400, 550 y 800\,nm) ponderado por
+el espectro solar para hacer el c\'alculo DISORT monocrom\'atico comparable
+con las mediciones de banda ancha, y se aplic\'o escalamiento de \AA ngstr\"om
+para trasladar el AOD entre longitudes de onda. La inversi\'on se
+resolvi\'o por bisecci\'on, aprovechando que $d_f(\text{AOD})$ es una
+funci\'on mon\'otona creciente, y el AOD recuperado se valid\'o contra
+mediciones independientes de AERONET (fotometr\'ia solar directa)
+colocalizadas en la misma estaci\'on.
+
+Este nivel demostr\'o que es posible recuperar AOD a partir de mediciones
+puramente de flujo (sin informaci\'on angular), aunque con limitaciones:
+el modelo de 3 bandas es una aproximaci\'on gruesa del espectro solar real,
+no se incluye absorci\'on gaseosa, y el filtrado de nubes basado en
+$d_f < 0.6$ y DNI $> 100$\,W/m$^2$ puede admitir cirros delgados.
+
+Otras limitaciones generales del modelo incluyen: la geometr\'ia
+plano-paralela, que ignora la curvatura terrestre y la heterogeneidad
+horizontal; la resoluci\'on \'unicamente del modo azimutal $m = 0$, que
+produce radiancias promediadas azimutalmente pero no captura la dependencia
+con $\phi$; el uso de la funci\'on de fase de Henyey-Greenstein de un
+solo par\'ametro, que no reproduce la estructura fina de las funciones de
+fase reales; la superficie Lambertiana, que no modela la reflectancia
+bidireccional (BRDF) de superficies reales ni la reflexi\'on especular
+sobre oc\'eanos; y la ausencia de emisi\'on t\'ermica y de absorci\'on
+gaseosa, que restringe la validez del modelo al espectro solar
+($\lambda < 3\;\mu$m) y a ventanas atmosf\'ericas libres de l\'ineas
+de absorci\'on.
+
+A pesar de estas limitaciones, el modelo constituye una implementaci\'on
+funcional y verificada de la cadena completa de teledecci\'on de aerosoles:
+desde la microf\'isica de las part\'iculas (teor\'ia de Mie) hasta la
+recuperaci\'on de par\'ametros \'opticos a partir de observaciones, pasando
+por la transferencia radiativa multicapa con todos los elementos
+num\'ericos necesarios para obtener resultados f\'isicamente consistentes.
+
+
+% ======================================================================
+% REFERENCES
+% ======================================================================
+\begin{thebibliography}{99}
+
+\bibitem{stamnes1988}
+Stamnes, K., Tsay, S.-C., Wiscombe, W., \& Jayaweera, K. (1988).
+Numerically stable algorithm for discrete-ordinate-method radiative transfer
+in multiple scattering and emitting layered media.
+\emph{Applied Optics}, 27(12), 2502--2509.
+
+\bibitem{disortreport}
+Stamnes, K., Tsay, S.-C., Wiscombe, W., \& Laszlo, I. (2000).
+DISORT, a General-Purpose Fortran Program for Discrete-Ordinate-Method
+Radiative Transfer in Scattering and Emitting Layered Media:
+Documentation of Methodology (v1.1).
+
+\bibitem{rodgers2000}
+Rodgers, C. D. (2000).
+\emph{Inverse Methods for Atmospheric Sounding: Theory and Practice}.
+World Scientific.
+
+\bibitem{chandrasekhar1960}
+Chandrasekhar, S. (1960).
+\emph{Radiative Transfer}.
+Dover Publications.
+
+\bibitem{bohren1983}
+Bohren, C. F., \& Huffman, D. R. (1983).
+\emph{Absorption and Scattering of Light by Small Particles}.
+Wiley.
+
+\bibitem{bodhaine1999}
+Bodhaine, B. A., Wood, N. B., Dutton, E. G., \& Slusser, J. R. (1999).
+On Rayleigh optical depth calculations.
+\emph{J. Atmos. Ocean. Tech.}, 16, 1854--1861.
+
+\bibitem{wiscombe1977}
+Wiscombe, W. J. (1977).
+The delta-M method: Rapid yet accurate radiative flux calculations for
+strongly asymmetric phase functions.
+\emph{J. Atmos. Sci.}, 34, 1408--1422.
+
+\bibitem{thomas1999}
+Thomas, G. E., \& Stamnes, K. (1999).
+\emph{Radiative Transfer in the Atmosphere and Ocean}.
+Cambridge University Press.
+
+\bibitem{stamnes1984}
+Stamnes, K., \& Conklin, P. (1984).
+A new multi-layer discrete ordinate approach to radiative transfer in
+vertically inhomogeneous atmospheres.
+\emph{J. Quant. Spectrosc. Radiat. Transfer}, 31, 273--282.
+
+\bibitem{holben1998}
+Holben, B. N., Eck, T. F., Slutsker, I., et al. (1998).
+AERONET --- A federated instrument network and data archive for
+aerosol characterization.
+\emph{Remote Sens. Environ.}, 66, 1--16.
+
+\bibitem{augustine2000}
+Augustine, J. A., DeLuisi, J. J., \& Long, C. N. (2000).
+SURFRAD --- A national surface radiation budget network for
+atmospheric research.
+\emph{Bull. Amer. Meteor. Soc.}, 81, 2341--2358.
+
+\bibitem{stamnes1982}
+Stamnes, K. (1982).
+On the computation of angular distributions of radiation in
+planetary atmospheres.
+\emph{J. Quant. Spectrosc. Radiat. Transfer}, 28, 47--51.
+
+\bibitem{sykes1951}
+Sykes, J. B. (1951).
+Approximate integration of the equation of transfer.
+\emph{Mon. Not. R. Astron. Soc.}, 111, 377--386.
+
+\bibitem{stamnes1981}
+Stamnes, K., \& Swanson, R. A. (1981).
+A new look at the discrete ordinate method for radiative transfer
+calculations in anisotropically scattering atmospheres.
+\emph{J. Atmos. Sci.}, 38, 387--399.
+
+\end{thebibliography}
+
+\end{document}

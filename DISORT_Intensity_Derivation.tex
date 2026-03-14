@@ -1,0 +1,1168 @@
+
+\documentclass[a4paper,11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{float}
+
+\geometry{margin=2cm}
+
+\newtcolorbox{concept}[1]{
+  colback=blue!5!white,
+  colframe=blue!75!black,
+  title={\textbf{#1}}
+}
+
+\newtcolorbox{implementation}[1]{
+  colback=green!5!white,
+  colframe=green!60!black,
+  title={\textbf{Implementaci\'on: #1}}
+}
+
+\newtcolorbox{physics}[1]{
+  colback=orange!5!white,
+  colframe=orange!70!black,
+  title={\textbf{Significado F\'isico: #1}}
+}
+
+\newtcolorbox{keyresult}[1]{
+  colback=red!5!white,
+  colframe=red!70!black,
+  title={\textbf{Resultado Clave: #1}}
+}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red!70!black},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{\textbf{Derivaci\'on Paso a Paso del C\'alculo de Intensidad\\en el Solver DISORT}\\[0.5cm]
+\large Trazabilidad Matem\'atica--C\'odigo del M\'etodo de Ordenadas Discretas}
+\author{Emmanuel}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ======================================================================
+\section{Introducci\'on}
+\label{sec:intro}
+% ======================================================================
+
+Este documento tiene como objetivo trazar, paso a paso, c\'omo el c\'odigo del solver DISORT calcula la \textbf{intensidad} $I(\tau, \mu_i)$ en un punto dado de la atm\'osfera.  Partimos de la expresi\'on final para la intensidad y descomponemos cada uno de sus par\'ametros: de d\'onde viene matem\'aticamente, c\'omo se define, y c\'omo est\'a implementado en el c\'odigo.
+
+\begin{concept}{Referencia principal}
+Las ecuaciones fundamentales provienen del \textit{DISORT Report v1.1} (Stamnes et al.), en particular:
+\begin{itemize}
+\item \textbf{Ecuaci\'on 27a}: Soluci\'on general evaluada en los puntos de cuadratura $\mu_i$.
+\item \textbf{Ecuaciones 35a/35b}: Intensidades en \'angulos arbitrarios (interpolaci\'on de la funci\'on fuente).
+\end{itemize}
+\textbf{Importante}: Nuestro c\'odigo implementa la \textbf{Ecuaci\'on 27a} (intensidades en los nodos de cuadratura), \textbf{no} las Ecs. 35a/35b. La diferencia se discute en la Secci\'on~\ref{sec:diff35}.
+\end{concept}
+
+El c\'odigo se organiza en el paquete \texttt{atrt/} con los m\'odulos:
+\begin{itemize}
+\item \texttt{quadrature.py} --- Nodos y pesos de cuadratura Double-Gauss.
+\item \texttt{phase.py} --- Funci\'on de fase de Henyey--Greenstein y matriz de fase.
+\item \texttt{solver.py} --- Solver DISORT (autovalores, soluci\'on particular, condiciones de frontera).
+\item \texttt{profile.py} --- Perfil atmosf\'erico (propiedades \'opticas por capa).
+\end{itemize}
+
+% ======================================================================
+\section{La Expresi\'on para la Intensidad (Ecuaci\'on 27a)}
+\label{sec:intensity_expr}
+% ======================================================================
+
+La ecuaci\'on de transferencia radiativa (RTE) para una atm\'osfera plano-paralela, tras la discretizaci\'on en ordenadas discretas y la separaci\'on azimutal ($m=0$, sin emisi\'on t\'ermica), tiene la soluci\'on general (DISORT Report, Ec.\ 27a):
+
+\begin{keyresult}{Soluci\'on General en los Puntos de Cuadratura}
+\begin{equation}
+\boxed{
+I(\tau, \mu_i) = \sum_{\substack{j=-N \\ j \neq 0}}^{N} C_j \, G_j(\mu_i) \, e^{-k_j \tau} + Z_0(\mu_i) \, e^{-\tau/\mu_0}
+}
+\label{eq:27a}
+\end{equation}
+donde:
+\begin{itemize}
+\item $\mu_i$: nodo de cuadratura ($i = -N, \ldots, -1, 1, \ldots, N$; el \'indice 0 se reserva para el haz directo).
+\item $k_j$: autovalores del problema homog\'eneo ($k_j > 0$ para $j > 0$, $k_j < 0$ para $j < 0$).
+\item $G_j(\mu_i)$: componente $i$-\'esima del autovector $j$-\'esimo.
+\item $C_j$: constantes de integraci\'on (determinadas por las condiciones de frontera).
+\item $Z_0(\mu_i)$: soluci\'on particular debida al haz solar directo.
+\item $\mu_0 = \cos\theta_0$: coseno del \'angulo cenital solar.
+\end{itemize}
+\end{keyresult}
+
+En el c\'odigo, el t\'ermino del haz directo $j=0$ se absorbe en la soluci\'on particular $Z_p$, por lo que la expresi\'on implementada es:
+
+\begin{equation}
+I(\tau, \mu_i) = \sum_{j=1}^{N} \widetilde{C}_j \, E_{ij} \, \text{exp\_factor}_j + Z_{p,i} \cdot (\text{factor beam})
+\label{eq:code_intensity}
+\end{equation}
+
+donde $\widetilde{C}_j$ son los coeficientes estabilizados y $E_{ij}$ es la matriz de autovectores completa.
+
+\begin{implementation}{Intensidad TOA --- \texttt{solver.py}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py, lineas 321-324
+I_toa = np.zeros(self.n_half)
+for k_out, str_i in enumerate(self.up_idx):
+    I_toa[k_out] = (np.dot(C_first * exp_toa,
+                           E_first[str_i, :])
+                    + Z_p_first[str_i])
+\end{lstlisting}
+Aqu\'i:
+\begin{itemize}
+\item \texttt{C\_first} $= \widetilde{C}_j$ para la primera capa (vector de $N$ elementos).
+\item \texttt{exp\_toa} $= $ exponenciales estabilizadas evaluadas en $\tau' = 0$ (TOA).
+\item \texttt{E\_first[str\_i, :]} $= G_j(\mu_i)$, la fila $i$ de la matriz de autovectores.
+\item \texttt{Z\_p\_first[str\_i]} $= Z_0(\mu_i)$, soluci\'on particular evaluada en $\mu_i$.
+\item \texttt{self.up\_idx}: \'indices de los nodos con $\mu > 0$ (ascendentes/upwelling).
+\end{itemize}
+\end{implementation}
+
+\begin{implementation}{Intensidad BOA --- \texttt{solver.py}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py, lineas 338-343
+I_boa = np.zeros(self.n_half)
+for k_out, str_i in enumerate(self.down_idx):
+    I_boa[k_out] = (
+        np.dot(C_last * exp_boa, E_last[str_i, :])
+        + Z_p_last[str_i] * exp_beam_last
+    )
+\end{lstlisting}
+Diferencia con TOA: la soluci\'on particular se multiplica por $e^{-\tau_L/\mu_0}$ (atenuaci\'on del haz directo hasta el fondo de la atm\'osfera), y se usan los \'indices descendentes \texttt{down\_idx}.
+\end{implementation}
+
+En las secciones siguientes desglosamos cada componente.
+
+% ======================================================================
+\section{Los Nodos de Cuadratura $\mu_i$ (Double-Gauss)}
+\label{sec:quadrature}
+% ======================================================================
+
+La discretizaci\'on angular reemplaza la integral sobre $\mu \in [-1, 1]$ por una suma ponderada sobre $N$ nodos de cuadratura $\{\mu_i, w_i\}_{i=1}^{N}$.
+
+\subsection{Cuadratura Gauss-Legendre Est\'andar}
+
+La cuadratura de Gauss-Legendre de orden $n$ proporciona nodos $x_j$ y pesos $w_j$ tales que:
+\begin{equation}
+\int_{-1}^{1} f(x) \, dx \approx \sum_{j=1}^{n} w_j \, f(x_j)
+\end{equation}
+Los nodos son las ra\'ices del polinomio de Legendre $P_n(x)$.
+
+\subsection{Cuadratura Double-Gauss}
+
+En lugar de aplicar GL directamente en $[-1, 1]$, el esquema Double-Gauss aplica GL por separado en cada hemisferio $[0, 1]$ y $[-1, 0]$, lo cual proporciona mejor resoluci\'on angular cerca de las direcciones horizontal y vertical.
+
+\begin{concept}{Construcci\'on Double-Gauss}
+\begin{enumerate}
+\item Se obtienen $N/2$ nodos GL en $[-1, 1]$: $\{x_j, w_j^{GL}\}_{j=1}^{N/2}$.
+\item Se mapean a $[0, 1]$: $\mu_j^{+} = (1 + x_j)/2$, \quad $w_j = w_j^{GL}/2$.
+\item Hemisferio descendente: $\mu_j^{-} = -\mu_j^{+}$, mismos pesos.
+\item Vector completo: $\bm{\mu} = [-\mu_1^+, \ldots, -\mu_{N/2}^+, \, +\mu_1^+, \ldots, +\mu_{N/2}^+]$.
+\end{enumerate}
+\end{concept}
+
+\begin{implementation}{\texttt{quadrature.py} --- \texttt{double\_gauss()}}
+\begin{lstlisting}
+# Archivo: atrt/quadrature.py
+def double_gauss(n):
+    n_half = n // 2
+    x_gl, w_gl = np.polynomial.legendre.leggauss(n_half)
+    mu_pos = (1.0 + x_gl) / 2.0       # mapeo [-1,1] -> [0,1]
+    w_half = w_gl / 2.0                # pesos escalados
+    mus = np.concatenate([-mu_pos, mu_pos])
+    weights = np.concatenate([w_half, w_half])
+    return mus, weights
+\end{lstlisting}
+\begin{itemize}
+\item \texttt{mus}: vector de tama\~no $N$ con $\mu_i \in [-1, 1]$.
+\item \texttt{weights}: pesos sim\'etricos, $w_i^{-} = w_i^{+}$.
+\item Primer mitad ($i = 0, \ldots, N/2-1$): direcciones descendentes ($\mu < 0$).
+\item Segunda mitad ($i = N/2, \ldots, N-1$): direcciones ascendentes ($\mu > 0$).
+\end{itemize}
+\end{implementation}
+
+\begin{physics}{?`Por qu\'e Double-Gauss?}
+La cuadratura GL est\'andar en $[-1,1]$ concentra nodos cerca de los extremos $\mu = \pm 1$ (vertical).  Double-Gauss redistribuye los nodos para que haya buena resoluci\'on tanto en \'angulos cenitales altos como bajos \textit{dentro de cada hemisferio}, lo cual mejora la precisi\'on de las integrales de flujo $F = 2\pi \int_0^1 I(\mu) \, \mu \, d\mu$.
+\end{physics}
+
+% ======================================================================
+\section{La Funci\'on de Fase y la Matriz de Fase $\mathbf{P}$}
+\label{sec:phase}
+% ======================================================================
+
+La funci\'on de fase $p(\cos\Theta)$ describe la probabilidad angular de scattering.
+
+\subsection{Funci\'on de Fase de Henyey--Greenstein}
+
+La parametrizaci\'on HG es:
+\begin{equation}
+p_{HG}(\cos\Theta) = \frac{1 - g^2}{(1 + g^2 - 2g\cos\Theta)^{3/2}}
+\end{equation}
+donde $g \in [-1, 1]$ es el par\'ametro de asimetr\'ia ($g > 0$: scattering predominantemente hacia adelante).
+
+\subsection{Expansi\'on en Polinomios de Legendre}
+
+Cualquier funci\'on de fase se puede expandir como:
+\begin{equation}
+p(\cos\Theta) = \sum_{l=0}^{L-1} \chi_l \, P_l(\cos\Theta)
+\end{equation}
+
+Para la funci\'on HG, los coeficientes tienen forma cerrada:
+\begin{equation}
+\boxed{\chi_l = (2l + 1) \, g^l}
+\label{eq:chi_l}
+\end{equation}
+
+\begin{implementation}{\texttt{phase.py} --- \texttt{legendre\_expansion\_hg()}}
+\begin{lstlisting}
+# Archivo: atrt/phase.py
+def legendre_expansion_hg(g, n_terms):
+    return np.array([(2*l+1) * (g**l)
+                     for l in range(n_terms)])
+\end{lstlisting}
+Retorna el vector $[\chi_0, \chi_1, \ldots, \chi_{N-1}]$ con $\chi_l = (2l+1)g^l$.
+\end{implementation}
+
+\subsection{Polinomios de Legendre $P_l(\mu)$}
+
+Los polinomios de Legendre se calculan con la recurrencia de tres t\'erminos:
+\begin{equation}
+P_0(\mu) = 1, \quad P_1(\mu) = \mu, \quad (l+1)P_{l+1}(\mu) = (2l+1)\mu \, P_l(\mu) - l \, P_{l-1}(\mu)
+\label{eq:legendre_recurrence}
+\end{equation}
+
+\begin{implementation}{\texttt{phase.py} --- \texttt{\_legendre\_polynomials()}}
+\begin{lstlisting}
+# Archivo: atrt/phase.py
+def _legendre_polynomials(mu, l_max):
+    n = len(mu)
+    P = np.zeros((l_max, n))
+    P[0, :] = 1.0
+    if l_max > 1:
+        P[1, :] = mu
+    for l in range(1, l_max - 1):
+        P[l+1,:] = ((2*l+1)*mu*P[l,:] - l*P[l-1,:])/(l+1)
+    return P    # shape (l_max, n)
+\end{lstlisting}
+Retorna la matriz $P_{l,i} = P_l(\mu_i)$ de tama\~no $(L \times N)$, donde $L = N$ (n\'umero de t\'erminos = n\'umero de streams).
+\end{implementation}
+
+\subsection{Matriz de Fase}
+
+La discretizaci\'on angular requiere la \textbf{matriz de fase} $\mathbf{P}$ de tama\~no $N \times N$:
+\begin{equation}
+\boxed{P_{ij} = \sum_{l=0}^{N-1} \chi_l \, P_l(\mu_i) \, P_l(\mu_j)}
+\label{eq:phase_matrix}
+\end{equation}
+
+F\'isicamente, $P_{ij}$ mide cu\'anto de la radiaci\'on viajando en direcci\'on $\mu_j$ se dispersa hacia la direcci\'on $\mu_i$.
+
+\begin{implementation}{\texttt{phase.py} --- \texttt{get\_phase\_matrix()}}
+\begin{lstlisting}
+# Archivo: atrt/phase.py
+def get_phase_matrix(mu_array, g, n_streams):
+    l_max = n_streams
+    chi = legendre_expansion_hg(g, l_max)    # (L,)
+    P_leg = _legendre_polynomials(mu_array, l_max)  # (L, N)
+    weighted = chi[:, None] * P_leg          # (L, N)
+    return weighted.T @ P_leg               # (N, N)
+\end{lstlisting}
+Calcula $\mathbf{P} = (\bm{\chi} \odot \mathbf{P}_{leg})^T \cdot \mathbf{P}_{leg}$ donde $\odot$ es el producto elemento a elemento con broadcasting. El resultado es la Ec.~\eqref{eq:phase_matrix} en forma matricial.
+\end{implementation}
+
+% ======================================================================
+\section{La Matriz $\mathbf{A}$ del Sistema de Ecuaciones}
+\label{sec:A_matrix}
+% ======================================================================
+
+La RTE discretizada (DISORT Report, Ec.\ 14e), para la componente $m=0$ y una capa homog\'enea, se escribe como:
+\begin{equation}
+\mu_i \frac{dI(\tau, \mu_i)}{d\tau} = I(\tau, \mu_i) - \frac{\omega}{2} \sum_{j=-N}^{N} w_j \, p(\mu_i, \mu_j) \, I(\tau, \mu_j) - Q(\tau, \mu_i)
+\end{equation}
+
+Definiendo el vector $\mathbf{I}(\tau) = [I(\tau, \mu_{-N}), \ldots, I(\tau, \mu_{N})]^T$ y las matrices:
+\begin{align}
+\mathbf{M}^{-1} &= \text{diag}\!\left(\frac{1}{\mu_1}, \ldots, \frac{1}{\mu_N}\right) & &\text{(inversa de los cosenos)} \\
+\mathbf{W} &= \text{diag}(w_1, \ldots, w_N) & &\text{(pesos de cuadratura)} \\
+\mathbf{P} &= [P_{ij}] & &\text{(matriz de fase, Ec.~\ref{eq:phase_matrix})}
+\end{align}
+
+la RTE homog\'enea se puede escribir como:
+\begin{equation}
+\frac{d\mathbf{I}}{d\tau} = \mathbf{A} \, \mathbf{I}
+\end{equation}
+
+con la \textbf{matriz de coeficientes}:
+
+\begin{keyresult}{Matriz $\mathbf{A}$ ($N \times N$)}
+\begin{equation}
+\boxed{\mathbf{A} = \mathbf{M}^{-1} \left[ -\mathbf{I}_N + \frac{\omega}{2} \, \mathbf{P} \, \mathbf{W} \right]}
+\label{eq:A_matrix}
+\end{equation}
+donde $\mathbf{I}_N$ es la matriz identidad de orden $N$.
+\end{keyresult}
+
+\begin{physics}{Interpretaci\'on de $\mathbf{A}$}
+Cada elemento $A_{ij}$ mide c\'omo la intensidad en la direcci\'on $\mu_j$ contribuye a la tasa de cambio de la intensidad en la direcci\'on $\mu_i$. El primer t\'ermino $-\mathbf{I}_N$ es la extinci\'on (Beer-Lambert), y el segundo $(\omega/2)\mathbf{P}\mathbf{W}$ es la ganancia por scattering m\'ultiple.
+\end{physics}
+
+\begin{implementation}{\texttt{solver.py} --- Construcci\'on de $\mathbf{A}$}
+\begin{lstlisting}
+# Archivo: atrt/solver.py, dentro de _layer_eigen()
+M_inv = np.diag(1.0 / mus)               # (N, N)
+W_diag = np.diag(weights)                # (N, N)
+P_mat = get_phase_matrix(mus, g, N)      # (N, N)
+
+A = M_inv @ (-np.eye(N) + (omega/2.0) * (P_mat @ W_diag))
+\end{lstlisting}
+Variables:
+\begin{itemize}
+\item \texttt{mus}: $[\mu_1, \ldots, \mu_N]$ --- nodos de cuadratura Double-Gauss.
+\item \texttt{weights}: $[w_1, \ldots, w_N]$ --- pesos de cuadratura.
+\item \texttt{omega}: $\omega$ --- albedo de scattering simple de la capa.
+\item \texttt{g}: $g$ --- par\'ametro de asimetr\'ia HG.
+\end{itemize}
+\end{implementation}
+
+% ======================================================================
+\section{El Problema de Autovalores Reducido}
+\label{sec:eigenvalue}
+% ======================================================================
+
+La soluci\'on homog\'enea de $d\mathbf{I}/d\tau = \mathbf{A}\mathbf{I}$ tiene la forma $\mathbf{I} = \mathbf{G} \, e^{-k\tau}$, lo que conduce al problema de autovalores $\mathbf{A}\mathbf{G} = -k\mathbf{G}$, de orden $N \times N$.
+
+\subsection{Reducci\'on por Simetr\'ia Hemisf\'erica}
+
+La cuadratura Double-Gauss garantiza una estructura de bloques en $\mathbf{A}$. Particionando seg\'un los hemisferios ascendente ($u$) y descendente ($d$):
+
+\begin{equation}
+\mathbf{A} = \begin{pmatrix} \mathbf{A}_{uu} & \mathbf{A}_{ud} \\ \mathbf{A}_{du} & \mathbf{A}_{dd} \end{pmatrix}
+\end{equation}
+
+donde cada bloque es de tama\~no $(N/2) \times (N/2)$.
+
+Siguiendo Stamnes y Swanson (1981), definimos (an\'alogo a la Ec.\ 23f del DISORT Report):
+\begin{align}
+(\alpha + \beta) &\equiv \mathbf{A}_{uu} + \mathbf{A}_{ud} \label{eq:apb} \\
+(\alpha - \beta) &\equiv \mathbf{A}_{uu} - \mathbf{A}_{ud} \label{eq:amb}
+\end{align}
+
+El problema de autovalores de orden $N$ se reduce a uno de orden $N/2$:
+
+\begin{keyresult}{Problema Reducido $(N/2) \times (N/2)$}
+\begin{equation}
+\boxed{\mathbf{M}_{red} \, \mathbf{v} = k^2 \, \mathbf{v}, \qquad \mathbf{M}_{red} = (\alpha - \beta)(\alpha + \beta)}
+\label{eq:reduced_eigen}
+\end{equation}
+Los autovalores $k_j^2$ son \textbf{reales y positivos} por construcci\'on, y los autovalores del problema original son $\pm k_j = \pm \sqrt{k_j^2}$.
+\end{keyresult}
+
+\begin{physics}{Ventaja de la reducci\'on}
+\begin{enumerate}
+\item El problema pasa de $N \times N$ a $(N/2) \times (N/2)$: para $N = 36$ streams, se resuelve un sistema $18 \times 18$ en lugar de $36 \times 36$.
+\item Se \textbf{garantizan autovalores reales}, evitando artefactos num\'ericos de autovalores complejos esp\'ureos.
+\item Los autovalores aparecen en pares $\pm k_j$, lo que refleja la simetr\'ia f\'isica entre propagaci\'on ascendente y descendente.
+\end{enumerate}
+\end{physics}
+
+\begin{implementation}{\texttt{solver.py} --- Problema de autovalores reducido}
+\begin{lstlisting}
+# Archivo: atrt/solver.py, _layer_eigen()
+# Extraer bloques hemisfericos
+ui = self.up_idx    # indices mu > 0
+di = self.down_idx  # indices mu < 0
+A_uu = A[np.ix_(ui, ui)]
+A_ud = A[np.ix_(ui, di)]
+
+# Matrices reducidas
+apb = A_uu + A_ud    # (alpha + beta)
+amb = A_uu - A_ud    # (alpha - beta)
+M_red = amb @ apb    # (N/2) x (N/2)
+
+# Resolver M_red v = k^2 v
+k2_vals, V = scipy.linalg.eig(M_red)
+k2_vals = np.real(k2_vals)   # reales por construccion
+V = np.real(V)
+
+# k_j = sqrt(k_j^2)
+k_vals = np.sqrt(np.maximum(k2_vals, 0.0))
+k_vals = np.maximum(k_vals, 1e-30)  # evitar division por cero
+
+# Autovalores completos: [+k, -k]
+evals = np.concatenate([k_vals, -k_vals])
+\end{lstlisting}
+Variables:
+\begin{itemize}
+\item \texttt{k2\_vals}: vector de $N/2$ autovalores $k_j^2$ del problema reducido.
+\item \texttt{V}: matriz $(N/2) \times (N/2)$ de autovectores del problema reducido.
+\item \texttt{evals}: vector de $N$ autovalores $[+k_1, \ldots, +k_{N/2}, -k_1, \ldots, -k_{N/2}]$.
+\end{itemize}
+\end{implementation}
+
+\begin{concept}{Caso conservativo $\omega = 1$}
+Cuando $\omega \to 1$, el autovalor m\'as peque\~no $k_j \to 0$, causando singularidades en la recuperaci\'on de autovectores ($1/k_j$). Siguiendo la pr\'actica est\'andar de CDISORT, el c\'odigo clampea:
+\begin{lstlisting}
+omega = min(omega, 1.0 - 1e-12)
+\end{lstlisting}
+Esto es equivalente al ``dithering'' descrito en la Secci\'on 2.4.2 del DISORT Report.
+\end{concept}
+
+% ======================================================================
+\section{Recuperaci\'on de los Autovectores Completos}
+\label{sec:eigenvectors}
+% ======================================================================
+
+El problema reducido (Ec.~\ref{eq:reduced_eigen}) nos da los autovectores $\mathbf{v}_j$ de tama\~no $N/2$. Necesitamos recuperar los autovectores completos $\mathbf{G}_j$ de tama\~no $N$ (uno por cada direcci\'on de cuadratura).
+
+\subsection{F\'ormulas de Recuperaci\'on}
+
+De la Ec.\ 22c del DISORT Report, para el autovalor $+k_j$:
+
+\begin{equation}
+\mathbf{G}^+ = \frac{1}{2}\left[\mathbf{v}_j + \frac{(\alpha + \beta)\mathbf{v}_j}{k_j}\right], \qquad
+\mathbf{G}^- = \frac{1}{2}\left[\mathbf{v}_j - \frac{(\alpha + \beta)\mathbf{v}_j}{k_j}\right]
+\label{eq:eigvec_recovery}
+\end{equation}
+
+donde $\mathbf{G}^+$ contiene las componentes ascendentes ($\mu > 0$) y $\mathbf{G}^-$ las descendentes ($\mu < 0$).
+
+\begin{keyresult}{Estructura de la Matriz de Autovectores $\mathbf{E}$}
+La matriz $\mathbf{E}$ de tama\~no $N \times N$ se construye como:
+\begin{equation}
+\mathbf{E} = \begin{pmatrix}
+E_{\text{up}, 1}^{+k} & \cdots & E_{\text{up}, N/2}^{+k} & E_{\text{up}, 1}^{-k} & \cdots & E_{\text{up}, N/2}^{-k} \\[4pt]
+E_{\text{dn}, 1}^{+k} & \cdots & E_{\text{dn}, N/2}^{+k} & E_{\text{dn}, 1}^{-k} & \cdots & E_{\text{dn}, N/2}^{-k}
+\end{pmatrix}
+\end{equation}
+\begin{itemize}
+\item Columnas $1$ a $N/2$: autovectores para autovalores \textbf{positivos} $+k_j$.
+\item Columnas $N/2+1$ a $N$: autovectores para autovalores \textbf{negativos} $-k_j$.
+\item Para $+k_j$: filas ascendentes $= \mathbf{G}^+$, filas descendentes $= \mathbf{G}^-$.
+\item Para $-k_j$: se \textbf{intercambian}: filas ascendentes $= \mathbf{G}^-$, filas descendentes $= \mathbf{G}^+$.
+\end{itemize}
+\end{keyresult}
+
+\begin{implementation}{\texttt{solver.py} --- Recuperaci\'on de autovectores}
+\begin{lstlisting}
+# Archivo: atrt/solver.py, _layer_eigen()
+E = np.zeros((N, N))
+for j in range(n_half):
+    apb_v = apb @ V[:, j]       # (alpha+beta) * v_j
+    g_plus  = (V[:,j] + apb_v / k_vals[j]) / 2.0
+    g_minus = (V[:,j] - apb_v / k_vals[j]) / 2.0
+    # +k_j: E[up] = G+, E[down] = G-
+    E[ui, j] = g_plus
+    E[di, j] = g_minus
+    # -k_j: intercambio
+    E[ui, n_half + j] = g_minus
+    E[di, n_half + j] = g_plus
+\end{lstlisting}
+Variables:
+\begin{itemize}
+\item \texttt{V[:, j]}: $j$-\'esimo autovector reducido $\mathbf{v}_j$ (tama\~no $N/2$).
+\item \texttt{apb}: $(\alpha + \beta) = \mathbf{A}_{uu} + \mathbf{A}_{ud}$.
+\item \texttt{g\_plus}, \texttt{g\_minus}: $\mathbf{G}^+$ y $\mathbf{G}^-$ de la Ec.~\eqref{eq:eigvec_recovery}.
+\item \texttt{E}: la matriz completa de autovectores $N \times N$.
+\end{itemize}
+\end{implementation}
+
+\begin{physics}{?`Por qu\'e se intercambian $\mathbf{G}^+$ y $\mathbf{G}^-$?}
+Un autovalor $+k_j$ corresponde a una soluci\'on que \textit{decae} desde la parte superior de la capa. Su ``gemelo'' $-k_j$ decae desde la parte inferior. La simetr\'ia de la ecuaci\'on de transporte implica que el rol de las componentes ascendentes y descendentes se invierte al cambiar el signo de $k_j$.
+\end{physics}
+
+% ======================================================================
+\section{La Soluci\'on Particular $Z_p$ (Fuente del Haz Solar)}
+\label{sec:particular}
+% ======================================================================
+
+La soluci\'on particular maneja la contribuci\'on del haz solar directo a la intensidad. Sin fuentes t\'ermicas, la RTE tiene un t\'ermino forzante:
+\begin{equation}
+Q_{\text{beam}}(\tau, \mu_i) = X_0(\mu_i) \, e^{-\tau/\mu_0}
+\end{equation}
+
+donde $X_0(\mu_i)$ es el vector fuente del haz (Ec.\ 8c del DISORT Report).
+
+\subsection{Vector Fuente del Haz $\mathbf{S}_{\text{beam}}$}
+
+\begin{equation}
+\boxed{S_{\text{beam}}(\mu_i) = \frac{\omega F_0}{4\pi} \, p(\mu_i, -\mu_0) = \frac{\omega F_0}{4\pi} \sum_{l=0}^{N-1} \chi_l \, P_l(\mu_i) \, P_l(-\mu_0)}
+\label{eq:beam_source}
+\end{equation}
+
+donde:
+\begin{itemize}
+\item $\omega$: albedo de scattering simple.
+\item $F_0$: irradiancia solar extraterrestre.
+\item $p(\mu_i, -\mu_0)$: funci\'on de fase evaluada entre la direcci\'on solar incidente ($-\mu_0$) y la direcci\'on de observaci\'on ($\mu_i$).
+\item El signo negativo en $\mu_0$ indica que el sol ilumina desde arriba (direcci\'on descendente).
+\end{itemize}
+
+\begin{implementation}{\texttt{phase.py} --- \texttt{get\_beam\_source()}}
+\begin{lstlisting}
+# Archivo: atrt/phase.py
+def get_beam_source(mu_array, mu0, g, omega, f0):
+    l_max = len(mu_array)
+    chi = legendre_expansion_hg(g, l_max)
+
+    # P_l(-mu0) via recurrencia
+    Pl_mu0 = np.zeros(l_max)
+    Pl_mu0[0] = 1.0
+    if l_max > 1:
+        Pl_mu0[1] = -mu0
+    for l in range(1, l_max - 1):
+        Pl_mu0[l+1] = ((2*l+1)*(-mu0)*Pl_mu0[l]
+                       - l*Pl_mu0[l-1]) / (l+1)
+
+    P_leg = _legendre_polynomials(mu_array, l_max)
+
+    # P(mu_i, -mu0) = sum_l chi_l P_l(mu_i) P_l(-mu0)
+    P_val = (chi * Pl_mu0) @ P_leg     # (N,)
+
+    return (omega * f0 / (4.0 * np.pi)) * P_val
+\end{lstlisting}
+Notar que $P_l(-\mu_0)$ se calcula \textit{por separado} usando la misma recurrencia de Legendre pero evaluada en $-\mu_0$, mientras que $P_l(\mu_i)$ se calcula para todos los nodos de cuadratura simult\'aneamente.
+\end{implementation}
+
+\subsection{Construcci\'on de $Z_p$}
+
+La soluci\'on particular tiene la forma $I_{\text{part}}(\tau, \mu_i) = Z_{p,i} \, e^{-\tau/\mu_0}$ (Ec.\ 24a del Report). Sustituyendo en la RTE:
+
+\begin{equation}
+\boxed{\left(\mathbf{A} - \frac{1}{\mu_0}\mathbf{I}_N\right) \mathbf{Z}_p = -\mathbf{Q}, \qquad \mathbf{Q} = \mathbf{M}^{-1} \mathbf{S}_{\text{beam}}}
+\label{eq:Zp}
+\end{equation}
+
+Este es un sistema lineal de $N$ ecuaciones con $N$ inc\'ognitas.
+
+\begin{implementation}{\texttt{solver.py} --- \texttt{\_particular\_solution()}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py
+def _particular_solution(self, A, mu0, g, omega, f0):
+    S_beam = get_beam_source(self.mus, mu0, g, omega, f0)
+    M_inv = np.diag(1.0 / self.mus)
+    Q = M_inv @ S_beam                              # Q_i = S_i / mu_i
+    LHS = A - (1.0/mu0) * np.eye(self.n_streams)
+    Z_p = scipy.linalg.solve(LHS, -Q)
+    return Z_p
+\end{lstlisting}
+Variables:
+\begin{itemize}
+\item \texttt{S\_beam}: $\mathbf{S}_{\text{beam}}$ de la Ec.~\eqref{eq:beam_source} (vector de $N$).
+\item \texttt{Q}: $\mathbf{Q} = \mathbf{M}^{-1}\mathbf{S}_{\text{beam}}$ (escalado por $1/\mu_i$).
+\item \texttt{LHS}: $\mathbf{A} - (1/\mu_0)\mathbf{I}_N$ (matriz $N \times N$).
+\item \texttt{Z\_p}: soluci\'on del sistema lineal (vector de $N$).
+\end{itemize}
+\end{implementation}
+
+\begin{concept}{Singularidad removible}
+Cuando $\mu_0$ coincide con un nodo de cuadratura $\mu_i$, la matriz $\mathbf{A} - (1/\mu_0)\mathbf{I}$ se vuelve singular.  El c\'odigo perturba $\mu_0$ ligeramente:
+\begin{lstlisting}
+_MU0_EPS = 1e-3
+for mu_node in np.abs(self.mus):
+    if abs(mu0 - mu_node) < _MU0_EPS:
+        mu0 = mu_node + _MU0_EPS
+        break
+\end{lstlisting}
+Esto corresponde a la Secci\'on 3.4.3 del DISORT Report (singularidades removibles v\'ia la regla de L'H\^opital).
+\end{concept}
+
+% ======================================================================
+\section{El Escalamiento Delta-M}
+\label{sec:delta_m}
+% ======================================================================
+
+Las funciones de fase con scattering fuertemente hacia adelante ($g$ grande) requieren muchos t\'erminos de Legendre para ser representadas fielmente.  El escalamiento delta-M trunca este pico de scattering forward, reemplazando los par\'ametros \'opticos originales $(\tau, \omega, g)$ por par\'ametros escalados $(\tau', \omega', g')$.
+
+\subsection{Transformaci\'on}
+
+La fracci\'on truncada es $f = g^N$ (donde $N$ es el n\'umero de streams). Las transformaciones son:
+
+\begin{keyresult}{Escalamiento Delta-M}
+\begin{align}
+\tau' &= \tau(1 - \omega f) \label{eq:delta_tau} \\
+\omega' &= \frac{\omega(1 - f)}{1 - \omega f} \label{eq:delta_omega} \\
+g' &= \frac{g - f}{1 - f} \label{eq:delta_g}
+\end{align}
+\end{keyresult}
+
+\begin{physics}{?`Qu\'e hace Delta-M?}
+\begin{itemize}
+\item \textbf{Reduce $\tau$}: El pico forward no contribuye a la radiaci\'on difusa, as\'i que la profundidad \'optica efectiva es menor.
+\item \textbf{Reduce $\omega$}: Menos scattering efectivo (el pico forward se trata como transmisi\'on directa).
+\item \textbf{Reduce $g$}: La funci\'on de fase residual es m\'as isotr\'opica.
+\item Para $N = 36$ y $g = 0.7$: $f = 0.7^{36} \approx 3.3 \times 10^{-6}$, as\'i que Delta-M apenas modifica los par\'ametros. Para $g = 0.95$: $f = 0.95^{36} \approx 0.16$, y la correcci\'on es significativa.
+\end{itemize}
+\end{physics}
+
+\begin{implementation}{\texttt{solver.py} --- \texttt{\_apply\_delta\_m()}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py
+def _apply_delta_m(self, tau, omega, g):
+    f = g ** self.n_streams
+    tau_p = tau * (1.0 - omega * f)
+    denom = 1.0 - omega * f
+    omega_p = omega*(1.0-f)/denom if denom > 0 else omega
+    g_p = (g - f)/(1.0 - f) if abs(1.0 - f) > 1e-15 else 0.0
+    return tau_p, omega_p, g_p
+\end{lstlisting}
+El escalamiento se aplica \textbf{antes} del c\'alculo de autovalores, dentro del bucle por capas:
+\begin{lstlisting}
+for k in range(n_layers):
+    tau_k, omega_k, g_k = profile.tau[k], profile.ssa[k], profile.g[k]
+    if delta_m:
+        tau_k, omega_k, g_k = self._apply_delta_m(tau_k, omega_k, g_k)
+    eig = self._layer_eigen(omega_k, g_k)
+    Z_p = self._particular_solution(eig["A"], mu0, g_k, omega_k, f0)
+\end{lstlisting}
+\end{implementation}
+
+% ======================================================================
+\section{Las Exponenciales Estabilizadas}
+\label{sec:stable_exp}
+% ======================================================================
+
+La soluci\'on general (Ec.~\ref{eq:27a}) contiene t\'erminos $e^{-k_j \tau}$.  Para autovalores $k_j$ grandes y/o $\tau$ grande, estas exponenciales pueden causar overflow num\'erico ($e^{+|k_j|\tau} \to \infty$).
+
+\subsection{Principio de Estabilizaci\'on}
+
+La idea (Secci\'on 2.10 del DISORT Report, Ec.\ 48) es redefinir las constantes de integraci\'on $C_j$ para absorber los factores exponenciales divergentes:
+
+\begin{equation}
+\widetilde{C}_j = \begin{cases}
+C_j & \text{para } k_j > 0 \text{ (referencia al tope de la capa)} \\
+C_j \, e^{-k_j \Delta\tau} & \text{para } k_j < 0 \text{ (referencia al fondo de la capa)}
+\end{cases}
+\end{equation}
+
+Con esta transformaci\'on, los factores exponenciales en la intensidad se calculan como:
+
+\begin{keyresult}{Exponenciales Estabilizadas}
+\begin{equation}
+\text{exp\_factor}_j(\tau') = \begin{cases}
+e^{-k_j \tau'} & j = 1, \ldots, N/2 \quad (k_j > 0) \\
+e^{-k_j (\tau' - \Delta\tau)} & j = N/2+1, \ldots, N \quad (k_j < 0)
+\end{cases}
+\label{eq:stable_exp}
+\end{equation}
+donde $\tau' \in [0, \Delta\tau]$ es la coordenada \'optica local dentro de la capa.
+\end{keyresult}
+
+Dado que $k_j > 0$ y $0 \leq \tau' \leq \Delta\tau$:
+\begin{itemize}
+\item Para $k_j > 0$: el argumento $-k_j \tau' \leq 0$, as\'i que $e^{-k_j \tau'} \in (0, 1]$.
+\item Para $k_j < 0$: $k_j = -|k_j|$ y $\tau' - \Delta\tau \leq 0$, as\'i que $e^{-k_j(\tau' - \Delta\tau)} = e^{|k_j|(\tau' - \Delta\tau)} \in (0, 1]$.
+\end{itemize}
+\textbf{Todas las exponenciales est\'an acotadas en $[0, 1]$}: no hay overflow posible.
+
+\begin{implementation}{\texttt{solver.py} --- \texttt{\_stable\_exp()}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py
+@staticmethod
+def _stable_exp(evals, n_pos, dtau, tau_prime):
+    N = len(evals)
+    out = np.zeros(N, dtype=float)
+    out[:n_pos] = np.exp(-evals[:n_pos] * tau_prime)
+    out[n_pos:] = np.exp(-evals[n_pos:] * (tau_prime - dtau))
+    return out
+\end{lstlisting}
+Evaluaciones clave:
+\begin{itemize}
+\item \textbf{TOA} ($\tau' = 0$): \texttt{exp[+k] = 1}, \texttt{exp[-k] = exp($|k|\Delta\tau$)} $\leq 1$ pues $\Delta\tau \geq 0$.
+\item \textbf{BOA} ($\tau' = \Delta\tau$): \texttt{exp[+k] = exp($-k\Delta\tau$)} $\leq 1$, \texttt{exp[-k] = 1}.
+\end{itemize}
+\end{implementation}
+
+% ======================================================================
+\section{Los Coeficientes $C_j$ (Condiciones de Frontera)}
+\label{sec:boundary}
+% ======================================================================
+
+Los coeficientes $\widetilde{C}_j$ se determinan imponiendo condiciones de frontera f\'isicas. Para $L$ capas con $N$ streams, hay $N \times L$ inc\'ognitas y se construye un sistema lineal global:
+\begin{equation}
+\underbrace{\mathbf{M}_{\text{bc}}}_{\substack{\text{matriz de condiciones}\\\text{de frontera}\,(NL \times NL)}} \cdot \underbrace{\widetilde{\mathbf{C}}}_{\substack{\text{coeficientes}\\\text{estabilizados}}} = \underbrace{\mathbf{b}}_{\substack{\text{lado}\\\text{derecho}}}
+\label{eq:bc_system}
+\end{equation}
+
+En el c\'odigo, esta matriz se llama \texttt{BC} (abreviatura de \textit{Boundary Conditions}, condiciones de frontera); \textbf{no es el producto de dos variables $B$ y $C$}, sino un \'unico nombre de variable.
+
+\subsection{Descomposici\'on Difusa--Directa: Clave para las Condiciones de Frontera}
+
+\begin{concept}{Intensidad total = difusa + haz directo}
+En la formulaci\'on DISORT, el campo de radiaci\'on total se descompone en dos partes:
+\begin{equation}
+I_{\text{total}}(\tau, \mu) = \underbrace{I_{\text{dif}}(\tau, \mu)}_{\text{lo que resuelve la RTE}} + \underbrace{F_0 \, e^{-\tau/\mu_0} \, \delta(\mu + \mu_0)}_{\text{haz solar directo (Beer-Lambert)}}
+\end{equation}
+La RTE que resolvemos es \textbf{exclusivamente para la componente difusa} $I_{\text{dif}}$.  El haz solar directo no es una condici\'on de frontera: entra como \textbf{t\'ermino fuente} a trav\'es de la soluci\'on particular $Z_p$ (Secci\'on~\ref{sec:particular}).
+
+Por lo tanto, todas las condiciones de frontera siguientes se refieren a la intensidad \textbf{difusa}.
+\end{concept}
+
+\subsection{Condici\'on TOA: Sin Intensidad Difusa Descendente}
+
+En el tope de la atm\'osfera ($\tau = 0$), no hay radiaci\'on \textbf{difusa} descendente:
+\begin{equation}
+I_{\text{dif}}^{-}(0, \mu_i) = 0, \qquad \text{para todo } \mu_i < 0
+\label{eq:bc_toa}
+\end{equation}
+
+\begin{physics}{?`Y el haz solar incidente?}
+El haz solar \textbf{s\'i est\'a incluido} en el c\'alculo, pero no como condici\'on de frontera.  Entra a trav\'es de:
+\begin{enumerate}
+\item El vector fuente del haz $\mathbf{S}_{\text{beam}}$ (Ec.~\ref{eq:beam_source}), que describe c\'omo el haz solar se dispersa en cada capa.
+\item La soluci\'on particular $Z_p$ (Ec.~\ref{eq:Zp}), que captura la respuesta de la atm\'osfera a ese forzamiento.
+\item El factor $e^{-\tau/\mu_0}$ que aten\'ua el haz directo con la profundidad.
+\end{enumerate}
+Desde el espacio exterior no llega radiaci\'on \textit{difusa} (dispersada); toda la radiaci\'on solar incidente viaja en una \'unica direcci\'on $-\mu_0$, y esa contribuci\'on ya est\'a capturada en $Z_p$.  La condici\'on $I_{\text{dif}}^{-}(0) = 0$ dice simplemente que no hay cielo brillante por encima de la atm\'osfera.
+\end{physics}
+
+Sustituyendo la soluci\'on general en $\tau = 0$:
+\begin{equation}
+\sum_{j=1}^{N} E_{ij} \, \widetilde{C}_j \, \text{exp\_factor}_j(0) = -Z_{p,i}, \qquad \forall \, i \in \text{down\_idx}
+\end{equation}
+
+Esto proporciona $N/2$ ecuaciones (una por cada direcci\'on descendente).
+
+\subsection{Condiciones de Interfaz: Continuidad}
+
+En cada interfaz entre capas $k$ y $k+1$ (en $\tau = \tau_{k+1}$), la intensidad difusa es continua para todas las direcciones:
+\begin{equation}
+I_k(\tau_{k+1}, \mu_i) = I_{k+1}(\tau_{k+1}, \mu_i), \qquad \forall \, i = 1, \ldots, N
+\label{eq:bc_interface}
+\end{equation}
+
+Cada interfaz proporciona $N$ ecuaciones. Para $L$ capas hay $L-1$ interfaces, dando $N(L-1)$ ecuaciones.
+
+\subsection{Condici\'on BOA: Reflexi\'on Lambertiana}
+
+En el fondo de la atm\'osfera ($\tau = \tau_L$), la superficie refleja la radiaci\'on incidente.  La condici\'on general del DISORT Report (Ec.\ 42b, discretizada como Ec.\ 43d) es:
+\begin{equation}
+I_g^m(\mu_i) = \delta_{m0}\,\varepsilon\,\pi B(T_g) + \rho_d^m(\mu_i, -\mu_0)\,\delta_{m0}\,\mu_0 F_0\,e^{-\tau_L/\mu_0} + \sum_{j=1}^{N} w_j\,\mu_j\,\rho_d^m(\mu_i, -\mu_j)\,I^m(\tau_L, -\mu_j)
+\label{eq:42b_general}
+\end{equation}
+
+Nuestro c\'odigo implementa el \textbf{caso particular} de esta ecuaci\'on bajo tres suposiciones:
+
+\begin{concept}{Simplificaciones aplicadas a la Ec.\ 42b}
+\begin{enumerate}
+\item \textbf{Sin emisi\'on t\'ermica}: $\varepsilon = 0$, $B(T_g) = 0$.  El primer t\'ermino desaparece.
+\item \textbf{Superficie Lambertiana}: La reflectancia bidireccional es constante e independiente de los \'angulos: $\rho_d(\mu_i, \mu_j) = A_s / \pi$ para todo $\mu_i, \mu_j$.
+\item \textbf{Componente azimutal $m = 0$}: Solo la componente sim\'etrica (no hay dependencia en $\phi$).
+\end{enumerate}
+\end{concept}
+
+Al sustituir $\rho_d = A_s/\pi$ en la Ec.~\eqref{eq:42b_general} y eliminar la emisi\'on t\'ermica:
+\begin{align}
+I^{+}(\tau_L, \mu_i) &= \frac{A_s}{\pi}\,\mu_0 F_0\,e^{-\tau_L/\mu_0} + \frac{A_s}{\pi}\sum_{k \in \text{down}} w_k\,|\mu_k|\,I^{-}(\tau_L, \mu_k) \nonumber \\
+&= \frac{A_s}{\pi} \left[ \underbrace{\mu_0 F_0 \, e^{-\tau_L / \mu_0}}_{F_{\text{dir}}^{\downarrow}} + \underbrace{2\pi \sum_{k \in \text{down}} w_k |\mu_k| \, I^{-}(\tau_L, \mu_k)}_{F_{\text{dif}}^{\downarrow}} \right], \qquad \forall \, \mu_i > 0
+\label{eq:bc_boa}
+\end{align}
+
+\begin{physics}{?`Por qu\'e aparecen flujos ($F$) y no intensidades ($I$) individuales?}
+Las \textbf{intensidades $I$ s\'i est\'an presentes}: aparecen dentro de $F_{\text{dif}}^{\downarrow}$.  Se agrupan como flujo porque la \textbf{ley de reflexi\'on Lambertiana} dice que la intensidad reflejada es proporcional a la \textit{energ\'ia total} (flujo) que incide sobre la superficie, no a cada rayo individual:
+\begin{equation}
+I_{\text{reflejada}} = \frac{A_s}{\pi} \times F_{\text{total incidente}}
+\end{equation}
+El factor $1/\pi$ convierte flujo (W/m$^2$) en intensidad isotr\'opica (W/m$^2$/sr). Los dos t\'erminos de flujo son:
+\begin{itemize}
+\item $F_{\text{dir}}^{\downarrow} = \mu_0 F_0 \, e^{-\tau_L/\mu_0}$: flujo del haz solar directo que llega a la superficie (atenuado por la atm\'osfera).
+\item $F_{\text{dif}}^{\downarrow} = 2\pi \sum_k w_k |\mu_k| \, I^{-}(\tau_L, \mu_k)$: flujo difuso descendente, calculado integrando (via cuadratura) las intensidades difusas $I^{-}$ ponderadas por $\mu$.
+\end{itemize}
+Si la superficie \textbf{no fuera Lambertiana}, aparecer\'ian directamente las intensidades $I(\mu_j)$ multiplicadas por la reflectancia bidireccional $\rho_d(\mu_i, \mu_j)$ para cada par de direcciones, como en la Ec.~\eqref{eq:42b_general}.
+\end{physics}
+
+Esto proporciona $N/2$ ecuaciones m\'as (una por cada direcci\'on ascendente).
+
+\subsection{Balance del Sistema}
+
+Total de ecuaciones: $N/2 + N(L-1) + N/2 = NL$.  Total de inc\'ognitas: $NL$.  El sistema est\'a determinado.
+
+\begin{implementation}{\texttt{solver.py} --- Sistema global de condiciones de frontera}
+El sistema se construye llenando la matriz \texttt{BC} (\textit{Boundary Conditions}) de tama\~no $(NL) \times (NL)$ y el vector \texttt{rhs} de tama\~no $NL$, y se resuelve con:
+\begin{lstlisting}
+# Archivo: atrt/solver.py
+# BC es el nombre de la variable (Boundary Conditions),
+# NO es el producto de B por C.
+BC = np.zeros((n_unknowns, n_unknowns))
+rhs = np.zeros(n_unknowns)
+# ... se llenan las ecuaciones TOA, interfaces, BOA ...
+C_all = scipy.linalg.solve(BC[:eq, :], rhs[:eq])
+\end{lstlisting}
+\texttt{C\_all} contiene los $NL$ coeficientes $\widetilde{C}_j$ para todas las capas.
+\end{implementation}
+
+\subsection{Significado F\'isico de los $\widetilde{C}_j$}
+
+\begin{physics}{Amplitudes Modales}
+Cada coeficiente $\widetilde{C}_j^{(n)}$ es la \textbf{amplitud del autómodo $j$} en la capa $n$.  Cada autómodo tiene:
+\begin{itemize}
+\item Un \textbf{perfil espacial}: $\text{exp\_stable}_j(\tau')$ --- decaimiento exponencial dentro de la capa.
+\item Un \textbf{patr\'on angular}: $E_{ij}^{(n)}$ --- c\'omo se distribuye la intensidad entre los $N$ streams.
+\end{itemize}
+
+El campo difuso completo en la capa $n$, a profundidad \'optica local $\tau'$ y direcci\'on $\mu_i$, es:
+\begin{equation}
+I_{\text{dif}}^{(n)}(\tau', \mu_i) = \sum_{j=1}^{N} \widetilde{C}_j^{(n)} \cdot \text{exp\_stable}_j(\tau') \cdot E_{ij}^{(n)} + Z_{p,i}^{(n)} \cdot e^{-\tau/\mu_0}
+\end{equation}
+
+Los modos con $k_j > 0$ (\'indices $j = 1, \ldots, N/2$) decaen desde el \textbf{tope} de la capa hacia abajo.  Los modos con $k_j < 0$ (\'indices $j = N/2+1, \ldots, N$) decaen desde el \textbf{fondo} hacia arriba.
+
+\textbf{Analog\'ia:}  Los $\widetilde{C}_j$ son como \textit{coeficientes de Fourier}.  Cada modo tiene una forma espacial y angular fija; $\widetilde{C}_j$ dice cu\'an fuerte se ``excita'' ese modo por las condiciones de frontera.
+\end{physics}
+
+\subsection{Ejemplo Concreto: 2 Capas, 4 Streams}
+
+Para construir intuici\'on, consideremos el caso m\'as peque\~no no trivial: $N = 4$ streams y $L = 2$ capas.
+
+\textbf{Setup:}
+\begin{itemize}
+\item $N = 4$ streams $\Rightarrow$ $n_{\text{half}} = 2$ autovalores positivos por capa.
+\item $L = 2$ capas $\Rightarrow$ $NL = 8$ inc\'ognitas: $\widetilde{C}_1^{(1)}, \widetilde{C}_2^{(1)}, \widetilde{C}_3^{(1)}, \widetilde{C}_4^{(1)}, \widetilde{C}_1^{(2)}, \widetilde{C}_2^{(2)}, \widetilde{C}_3^{(2)}, \widetilde{C}_4^{(2)}$.
+\item $N/2 = 2$ ecuaciones TOA + $N = 4$ ecuaciones de interfaz + $N/2 = 2$ ecuaciones BOA $= 8$.
+\end{itemize}
+
+\textbf{Estructura de la matriz $\mathbf{BC}$:}
+
+La siguiente tabla muestra la estructura por bloques de la matriz $8 \times 8$.  Las columnas corresponden a las 8 inc\'ognitas, y las filas a las 8 ecuaciones.  Cada entrada es el producto $E_{ij} \cdot \text{exp}_j$ evaluado en el punto apropiado.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\footnotesize
+\begin{tabular}{c|cccc|cccc|l}
+& \multicolumn{4}{c|}{Capa 1: $\widetilde{C}_1^{(1)} \cdots \widetilde{C}_4^{(1)}$}
+& \multicolumn{4}{c|}{Capa 2: $\widetilde{C}_1^{(2)} \cdots \widetilde{C}_4^{(2)}$}
+& rhs \\
+\hline
+TOA$_1$ & $E_{d_1,1}\text{e}_1^0$ & $E_{d_1,2}\text{e}_2^0$ & $E_{d_1,3}\text{e}_3^0$ & $E_{d_1,4}\text{e}_4^0$ & 0 & 0 & 0 & 0 & $-Z_{p,d_1}^{(1)}$ \\
+TOA$_2$ & $E_{d_2,1}\text{e}_1^0$ & $E_{d_2,2}\text{e}_2^0$ & $E_{d_2,3}\text{e}_3^0$ & $E_{d_2,4}\text{e}_4^0$ & 0 & 0 & 0 & 0 & $-Z_{p,d_2}^{(1)}$ \\
+\hline
+IF$_1$ & $E_{1,1}\text{e}_1^\Delta$ & $\cdots$ & $\cdots$ & $E_{1,4}\text{e}_4^\Delta$ & $-E_{1,1}\text{e}_1^0$ & $\cdots$ & $\cdots$ & $-E_{1,4}\text{e}_4^0$ & $\Delta Z_{p,1}$ \\
+IF$_2$ & $E_{2,1}\text{e}_1^\Delta$ & $\cdots$ & $\cdots$ & $E_{2,4}\text{e}_4^\Delta$ & $-E_{2,1}\text{e}_1^0$ & $\cdots$ & $\cdots$ & $-E_{2,4}\text{e}_4^0$ & $\Delta Z_{p,2}$ \\
+IF$_3$ & $E_{3,1}\text{e}_1^\Delta$ & $\cdots$ & $\cdots$ & $E_{3,4}\text{e}_4^\Delta$ & $-E_{3,1}\text{e}_1^0$ & $\cdots$ & $\cdots$ & $-E_{3,4}\text{e}_4^0$ & $\Delta Z_{p,3}$ \\
+IF$_4$ & $E_{4,1}\text{e}_1^\Delta$ & $\cdots$ & $\cdots$ & $E_{4,4}\text{e}_4^\Delta$ & $-E_{4,1}\text{e}_1^0$ & $\cdots$ & $\cdots$ & $-E_{4,4}\text{e}_4^0$ & $\Delta Z_{p,4}$ \\
+\hline
+BOA$_1$ & 0 & 0 & 0 & 0 & $(E-\rho F)_{u_1,1}$ & $\cdots$ & $\cdots$ & $(E-\rho F)_{u_1,4}$ & $\rho F_{\text{dir}} - Z_p^{(2)}$ \\
+BOA$_2$ & 0 & 0 & 0 & 0 & $(E-\rho F)_{u_2,1}$ & $\cdots$ & $\cdots$ & $(E-\rho F)_{u_2,4}$ & $\rho F_{\text{dir}} - Z_p^{(2)}$ \\
+\end{tabular}
+\end{center}
+
+\noindent donde:
+\begin{itemize}
+\item $\text{e}_j^0 = \text{exp\_stable}_j(0)$: exponencial estabilizada en el tope de la capa.
+\item $\text{e}_j^\Delta = \text{exp\_stable}_j(\Delta\tau)$: exponencial estabilizada en el fondo.
+\item $d_1, d_2$: \'indices de las dos direcciones descendentes ($\mu < 0$).
+\item $u_1, u_2$: \'indices de las dos direcciones ascendentes ($\mu > 0$).
+\item $\Delta Z_{p,i} = (Z_{p,i}^{(2)} - Z_{p,i}^{(1)}) e^{-\tau_1/\mu_0}$: salto en la soluci\'on particular en la interfaz.
+\item $(E - \rho F)$: combinaci\'on del autovector con el t\'ermino de reflexi\'on Lambertiana.
+\end{itemize}
+
+\begin{concept}{Estructura Block-Bidiagonal}
+La matriz $\mathbf{BC}$ tiene estructura \textbf{block-bidiagonal}: cada fila toca \textit{como m\'aximo dos bloques de capas adyacentes}.
+\begin{itemize}
+\item Las filas TOA solo involucran la capa~1.
+\item Las filas de interfaz acoplan la capa~$k$ con la capa~$k+1$ (continuidad).
+\item Las filas BOA solo involucran la capa~$L$.
+\end{itemize}
+Para $L$ capas, la matriz es $(NL) \times (NL)$ con bloques de tama\~no $N \times N$.  La estructura bidiagonal por bloques permite algoritmos de resoluci\'on en $\mathcal{O}(N^2 L)$ en lugar de $\mathcal{O}(N^3 L^3)$, aunque nuestro c\'odigo usa \texttt{scipy.linalg.solve} general por simplicidad.
+\end{concept}
+
+% ======================================================================
+\section{Resumen: Flujo Completo de C\'alculo}
+\label{sec:summary}
+% ======================================================================
+
+El siguiente diagrama resume el flujo completo desde los par\'ametros de entrada hasta las intensidades de salida:
+
+\begin{concept}{Flujo de c\'alculo de la intensidad}
+\begin{enumerate}
+\item \textbf{Entrada}: Par\'ametros \'opticos por capa $(\tau_k, \omega_k, g_k)$, \'angulo solar $\mu_0$, flujo $F_0$, albedo superficial $A_s$.
+
+\item \textbf{Cuadratura} (una vez): $\{\mu_i, w_i\}_{i=1}^{N} \leftarrow \texttt{double\_gauss}(N)$.
+
+\item \textbf{Para cada capa $k = 1, \ldots, L$}:
+\begin{enumerate}
+\item[(3a)] \textbf{Delta-M}: $(\tau_k, \omega_k, g_k) \to (\tau_k', \omega_k', g_k')$.
+\item[(3b)] \textbf{Matriz de fase}: $\mathbf{P} = \sum_l \chi_l \, P_l(\bm{\mu}) P_l(\bm{\mu})^T$.
+\item[(3c)] \textbf{Matriz $\mathbf{A}$}: $\mathbf{A} = \mathbf{M}^{-1}[-\mathbf{I} + (\omega'/2)\mathbf{P}\mathbf{W}]$.
+\item[(3d)] \textbf{Autovalores}: $\mathbf{M}_{red}\mathbf{v} = k^2\mathbf{v} \Rightarrow k_j, \mathbf{v}_j$.
+\item[(3e)] \textbf{Autovectores}: $\mathbf{v}_j \to \mathbf{E}$ (matriz $N \times N$).
+\item[(3f)] \textbf{Soluci\'on particular}: $(\mathbf{A} - \mu_0^{-1}\mathbf{I})\mathbf{Z}_p = -\mathbf{M}^{-1}\mathbf{S}_{\text{beam}}$.
+\end{enumerate}
+
+\item \textbf{Sistema global}: Ensamblar $\mathbf{BC} \cdot \widetilde{\mathbf{C}} = \mathbf{rhs}$ con:
+\begin{itemize}
+\item TOA: $I^{-}(0) = 0$.
+\item Interfaces: $I_k(\tau_{k+1}) = I_{k+1}(\tau_{k+1})$.
+\item BOA: reflexi\'on Lambertiana.
+\end{itemize}
+
+\item \textbf{Resolver}: $\widetilde{\mathbf{C}} = \mathbf{BC}^{-1}\mathbf{rhs}$.
+
+\item \textbf{Extraer intensidades}:
+\begin{align}
+I_{\text{TOA}}(\mu_i) &= \sum_{j=1}^{N} \widetilde{C}_j^{(1)} \, E_{ij}^{(1)} \, \text{exp}_j(0) + Z_{p,i}^{(1)} \\
+I_{\text{BOA}}(\mu_i) &= \sum_{j=1}^{N} \widetilde{C}_j^{(L)} \, E_{ij}^{(L)} \, \text{exp}_j(\Delta\tau_L) + Z_{p,i}^{(L)} \, e^{-\tau_L/\mu_0}
+\end{align}
+\end{enumerate}
+\end{concept}
+
+% ======================================================================
+\section{Intensidad en \'Angulos Arbitrarios (Ecs.~35a/35b)}
+\label{sec:interp35}
+% ======================================================================
+
+El m\'etodo \texttt{solve()} retorna intensidades en los $N/2$ nodos de cuadratura (Ec.~27a).  El m\'etodo \texttt{interpolate\_intensity()} extiende la soluci\'on a \textbf{cualquier \'angulo} $\mu \in (0, 1]$ mediante la integraci\'on de la funci\'on fuente (Ecs.~35a/35b del DISORT Report).
+
+\subsection{Idea: Iteraci\'on de la Funci\'on Fuente}
+
+Una vez resueltos los $\widetilde{C}_j$, la funci\'on fuente $S(\tau, \mu)$ queda determinada en cada capa:
+\begin{equation}
+S_n(\tau', \mu) = \sum_{j=1}^{N} \widetilde{C}_j^{(n)} \, \Psi_j^{(n)}(\mu) \, \text{exp\_stable}_j(\tau') + \Psi_0^{(n)}(\mu) \, e^{-\tau/\mu_0}
+\end{equation}
+donde los \textbf{coeficientes de fuente modal} son:
+\begin{align}
+\Psi_j(\mu) &= \frac{\omega}{2} \sum_{i=1}^{N} w_i \, p(\mu, \mu_i) \, E_{ij} \label{eq:psi_j} \\
+\Psi_0(\mu) &= \frac{\omega}{2} \sum_{i=1}^{N} w_i \, p(\mu, \mu_i) \, Z_{p,i} + \frac{\omega F_0}{4\pi} \, p(\mu, -\mu_0) \label{eq:psi_0}
+\end{align}
+
+\begin{physics}{?`Por qu\'e funciona para \'angulos arbitrarios?}
+La funci\'on de fase $p(\mu, \mu_i)$ puede evaluarse para \textit{cualquier} $\mu$, no solo nodos de cuadratura.  El truco es que $S$ se construye a partir de las intensidades de cuadratura $I(\tau, \mu_i)$ (ya resueltas), y luego se integra la RTE formalmente para obtener $I(\tau, \mu)$ en el \'angulo deseado.
+\end{physics}
+
+\subsection{Upwelling en TOA (Ec.~35a)}
+
+Para $\mu > 0$, la intensidad ascendente en $\tau = 0$ es:
+\begin{equation}
+I(0, +\mu) = I_{\text{sup}}(\mu) \, e^{-\tau_L/\mu} + \frac{1}{\mu} \sum_{n=1}^{L} \int_{\tau_{n-1}}^{\tau_n} S_n(\tau', \mu) \, e^{-\tau'/\mu} \, d\tau'
+\label{eq:35a}
+\end{equation}
+
+\textbf{Contribuci\'on del autómodo $j$ (en capa $n$):}
+
+Para $k_j > 0$ (referencia al tope):
+\begin{equation}
+\widetilde{C}_j \, \Psi_j(\mu) \, e^{-\tau_{\text{top}}/\mu} \cdot \frac{1 - e^{-(k_j + 1/\mu)\Delta\tau}}{1 + k_j \mu}
+\end{equation}
+
+Para $k_j < 0$ (referencia al fondo, estabilizado):
+\begin{equation}
+\widetilde{C}_j \, \Psi_j(\mu) \, e^{-\tau_{\text{top}}/\mu} \cdot \frac{e^{k_j \Delta\tau} - e^{-\Delta\tau/\mu}}{1 + k_j \mu}
+\end{equation}
+
+\textbf{Contribuci\'on del haz:}
+\begin{equation}
+\Psi_0(\mu) \, e^{-\tau_{\text{top}}(1/\mu + 1/\mu_0)} \cdot \frac{1 - e^{-(1/\mu + 1/\mu_0)\Delta\tau}}{1 + \mu/\mu_0}
+\end{equation}
+
+\textbf{T\'ermino de superficie (Lambertiana):}
+\begin{equation}
+I_{\text{sup}}(\mu) = \frac{A_s}{\pi} \left[ F_{\text{dir}}^{\downarrow} + F_{\text{dif}}^{\downarrow} \right]
+\end{equation}
+
+\subsection{Downwelling en BOA (Ec.~35b)}
+
+Para $\mu > 0$, la intensidad descendente $I(\tau_L, -\mu)$:
+\begin{equation}
+I(\tau_L, -\mu) = \frac{1}{\mu} \sum_{n=1}^{L} \int_{\tau_{n-1}}^{\tau_n} S_n(\tau', -\mu) \, e^{-(\tau_L - \tau')/\mu} \, d\tau'
+\label{eq:35b}
+\end{equation}
+
+(Sin t\'ermino de frontera en TOA porque no hay radiaci\'on difusa descendente desde el espacio.)
+
+\subsection{Singularidades}
+
+Cuando los denominadores se aproximan a cero, se usan l\'imites de Taylor:
+\begin{itemize}
+\item $|1 + k_j \mu| < \varepsilon$ (upwelling): $\widetilde{C}_j \Psi_j \Delta\tau \, e^{-\tau_{\text{top}}/\mu} / \mu$
+\item $|1 - k_j \mu| < \varepsilon$ (downwelling): $\widetilde{C}_j \Psi_j \Delta\tau \, e^{-(\tau_L - \tau_{\text{bot}})/\mu} / \mu$
+\item $|\mu - \mu_0| < \varepsilon$ (haz): $\Psi_0 \, e^{-\tau_{\text{top}} \cdot 2/\mu} \Delta\tau / \mu$
+\end{itemize}
+
+\subsection{Identidades en Nodos de Cuadratura}
+
+En los nodos de cuadratura $\mu_i$, las siguientes identidades garantizan que \texttt{interpolate\_intensity} reproduce exactamente el resultado de \texttt{solve()}:
+\begin{align}
+\Psi_j(\mu_i) &= E_{ij} (1 + k_j \mu_i) \\
+\Psi_0(\mu_i) &= Z_{p,i} (1 + \mu_i / \mu_0)
+\end{align}
+Estas se derivan directamente de la ecuaci\'on de autovalores $\mathbf{A}\mathbf{E} = \mathbf{E}\boldsymbol{\Lambda}$ y la ecuaci\'on de la soluci\'on particular.
+
+\begin{implementation}{\texttt{solver.py} --- \texttt{interpolate\_intensity()}}
+\begin{lstlisting}
+# Archivo: atrt/solver.py
+# Requiere: solve(store_state=True) previamente
+mu_user, I_toa = solver.interpolate_intensity(
+    user_mus=np.linspace(0.05, 1.0, 100),
+    output="toa"
+)
+\end{lstlisting}
+El m\'etodo calcula $\Psi_j(\mu)$ usando \texttt{phase\_function\_at\_angle()} y eval\'ua las integrales anal\'iticamente capa por capa.  Los m\'etodos privados son:
+\begin{itemize}
+\item \texttt{\_surface\_upwelling(mu)}: $I_{\text{sup}}(\mu)$ Lambertiana.
+\item \texttt{\_upwelling\_at\_toa(user\_mus)}: Ec.~\eqref{eq:35a} completa.
+\item \texttt{\_downwelling\_at\_boa(user\_mus)}: Ec.~\eqref{eq:35b} completa.
+\end{itemize}
+\end{implementation}
+
+% ======================================================================
+\section{An\'alisis del M\'aximo de Intensidad Cerca de $\theta \approx 90°$}
+\label{sec:horizon_max}
+% ======================================================================
+
+Una caracter\'istica notable en los resultados angulares del solver DISORT es que la intensidad difusa presenta un m\'aximo pronunciado cerca del horizonte ($\theta_v \approx 90°$, es decir $\mu \to 0^+$), tanto para la intensidad ascendente en TOA como para la descendente en BOA.  Este comportamiento es independiente del \'angulo de incidencia solar y tiene una explicaci\'on f\'isica y matem\'atica clara.
+
+\subsection{Explicaci\'on Matem\'atica: Integraci\'on de la Funci\'on Fuente}
+
+\subsubsection{TOA Upwelling}
+
+Recordando la Ec.~\eqref{eq:35a} para la intensidad ascendente en $\tau = 0$:
+\begin{equation}
+I(0, +\mu) = I_{\text{sup}}(\mu) \, e^{-\tau_L/\mu} + \frac{1}{\mu} \sum_{n=1}^{L} \int_{\tau_{n-1}}^{\tau_n} S_n(\tau', \mu) \, e^{-\tau'/\mu} \, d\tau'
+\end{equation}
+
+Para una sola capa homog\'enea con funci\'on fuente constante $S(\mu) \approx S_0$, la integral se evalúa anal\'iticamente:
+\begin{equation}
+I_{\text{scat}}(\mu) = \frac{S_0}{\mu} \int_0^{\Delta\tau} e^{-\tau'/\mu} \, d\tau' = S_0 \left(1 - e^{-\Delta\tau/\mu}\right)
+\label{eq:limb_integral}
+\end{equation}
+
+\textbf{Comportamiento l\'imite cuando $\mu \to 0^+$:}
+\begin{equation}
+\lim_{\mu \to 0^+} S_0 \left(1 - e^{-\Delta\tau/\mu}\right) = S_0
+\end{equation}
+ya que $e^{-\Delta\tau/\mu} \to 0$ exponencialmente.  Es decir, la contribuci\'on de la capa \textbf{satura} en el valor de la funci\'on fuente $S_0$.
+
+En contraste, para $\mu \to 1$ (nadir):
+\begin{equation}
+I_{\text{scat}}(\mu=1) = S_0 (1 - e^{-\Delta\tau})
+\end{equation}
+que para atm\'osferas \'opticamente delgadas ($\Delta\tau \ll 1$) vale $\approx S_0 \Delta\tau \ll S_0$.
+
+\begin{concept}{La Raz\'on F\'isica del M\'aximo en el Horizonte}
+Un observador mirando hacia el horizonte ($\theta \approx 90°$) ve la atm\'osfera \textbf{de canto}: la longitud del camino \'optico a trav\'es de cada capa es $\Delta\tau / \mu$, que diverge como $1/\mu$.  Esto significa:
+\begin{enumerate}
+\item M\'as material dispersor contribuye a la intensidad observada
+\item La contribuci\'on de cada capa se satura en $S_0$ (la fuente ya no puede dar m\'as)
+\item La superficie lejana queda ocultada por la extinci\'on $e^{-\tau_L/\mu} \to 0$
+\end{enumerate}
+El resultado neto es un m\'aximo de intensidad difusa en el horizonte.
+\end{concept}
+
+\subsubsection{Contribuci\'on de los Autómodos}
+
+Para el autómodo $j$ con autovalor $k_j > 0$, la contribuci\'on del eigenmode a la intensidad en TOA es:
+\begin{equation}
+I_j^{(n)}(\mu) = \widetilde{C}_j \, \Psi_j(\mu) \cdot \frac{e^{-\tau_{\text{top}}/\mu} (1 - e^{-\alpha_j \Delta\tau})}{\alpha_j \mu}
+\end{equation}
+con $\alpha_j = k_j + 1/\mu$.
+
+Cuando $\mu \to 0^+$, $\alpha_j \approx 1/\mu$ y:
+\begin{align}
+I_j^{(n)}(\mu) &\approx \widetilde{C}_j \, \Psi_j(\mu) \cdot \frac{e^{-\tau_{\text{top}}/\mu}}{1/\mu \cdot \mu} \left(1 - e^{-\Delta\tau/\mu}\right) \\
+&= \widetilde{C}_j \, \Psi_j(\mu) \cdot e^{-\tau_{\text{top}}/\mu} \to 0 \quad \text{(para capas profundas)}
+\end{align}
+Pero para la \textbf{capa superior} ($\tau_{\text{top}} = 0$):
+\begin{equation}
+I_j^{(1)}(\mu) \xrightarrow{\mu \to 0} \widetilde{C}_j \, \Psi_j(\mu)
+\end{equation}
+lo que da un valor finito, no cero.
+
+\subsubsection{Contribuci\'on del Haz Solar}
+
+La contribuci\'on del haz a la intensidad en TOA involucra:
+\begin{equation}
+I_{\text{beam}}^{(n)}(\mu) = \Psi_0(\mu) \cdot \frac{e^{-\tau_{\text{top}} (1/\mu + 1/\mu_0)} \left(1 - e^{-(1/\mu + 1/\mu_0)\Delta\tau}\right)}{1/\mu + 1/\mu_0}
+\end{equation}
+
+Cuando $\mu \to 0^+$, el factor dominante es $e^{-\tau_{\text{top}}/\mu} \to 0$ para capas profundas. Pero para la capa superior ($\tau_{\text{top}} = 0$):
+\begin{equation}
+I_{\text{beam}}^{(1)}(\mu) \xrightarrow{\mu \to 0} \frac{\Psi_0(\mu)}{1/\mu} = \mu \, \Psi_0(\mu) \to 0
+\end{equation}
+La contribuci\'on del haz tiende a cero, pero m\'as lentamente que la extinci\'on geom\'etrica.
+
+\subsubsection{El Factor $\Psi_j(\mu)$ y la Funci\'on de Fase}
+
+Los coeficientes de fuente modal $\Psi_j(\mu)$ contienen la funci\'on de fase evaluada al \'angulo $\mu$:
+\begin{equation}
+\Psi_j(\mu) = \frac{\omega}{2} \sum_{i=1}^{N} w_i \, p(\mu, \mu_i) \, E_{ij}
+\end{equation}
+
+Para la funci\'on de fase de Henyey-Greenstein:
+\begin{equation}
+p(\cos\Theta) = \frac{1 - g^2}{(1 + g^2 - 2g\cos\Theta)^{3/2}}
+\end{equation}
+donde $\cos\Theta = \mu \mu_i + \sqrt{(1-\mu^2)(1-\mu_i^2)}$.  Cuando $\mu \to 0$:
+\begin{equation}
+\cos\Theta \approx \sqrt{1 - \mu_i^2}
+\end{equation}
+lo que corresponde a dispersi\'on lateral, que para $g < 1$ da valores finitos y a menudo elevados de $p$.
+
+\subsection{BOA Downwelling: Doble Pico}
+
+Para la intensidad descendente en BOA (Ec.~\eqref{eq:35b}):
+\begin{equation}
+I(\tau_L, -\mu) = \frac{1}{\mu} \sum_{n=1}^{L} \int_{\tau_{n-1}}^{\tau_n} S_n(\tau', -\mu) \, e^{-(\tau_L - \tau')/\mu} \, d\tau'
+\end{equation}
+
+\begin{physics}{Doble Estructura en BOA}
+La intensidad BOA exhibe \textbf{dos contribuciones distintas}:
+\begin{enumerate}
+\item \textbf{M\'aximo en la direcci\'on solar ($\theta_v \approx \theta_0$)}: La componente difusa que resulta de la dispersi\'on forward del haz directo.  La funci\'on de fase $p(-\mu, -\mu_0)$ es m\'axima cuando $\mu \approx \mu_0$ (aureola solar o \textit{solar aureole}).
+\item \textbf{M\'aximo en el horizonte ($\theta_v \approx 90°$)}: El mismo efecto de longitud de camino que en TOA.  Para la \'ultima capa ($\tau_{\text{bot}} = \tau_L$):
+\begin{equation}
+I^{(L)}_j(\mu) = \widetilde{C}_j \, \Psi_j(-\mu) \cdot \frac{1 - e^{-(1/\mu - k_j)\Delta\tau}}{1 - k_j \mu}
+\end{equation}
+que satura cuando $\mu \to 0^+$ porque $1/(1-k_j\mu) \to 1$ y $1 - e^{-\Delta\tau/\mu} \to 1$.
+\end{enumerate}
+\end{physics}
+
+\subsection{Resumen Cuantitativo}
+
+Sea $\tau_L$ la profundidad \'optica total de la atm\'osfera.  Los reg\'imenes son:
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+\textbf{\'Angulo} & \textbf{R\'egimen} & \textbf{Comportamiento} \\
+\midrule
+$\mu \to 1$ (nadir/zenith) & Camino corto & $I \propto S_0 \cdot \Delta\tau$ (lineal en $\tau$) \\
+$\mu \sim 0.3$ (intermedio) & Transici\'on & Crecimiento no lineal \\
+$\mu \to 0^+$ (horizonte) & Camino infinito & $I \to S_0$ (saturaci\'on) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keyresult}{Independencia del \'Angulo de Incidencia}
+El m\'aximo en el horizonte aparece \textbf{independientemente de $\theta_0$} porque es una propiedad \textbf{geom\'etrica de la observaci\'on}, no de la iluminaci\'on.  El \'angulo solar $\theta_0$ determina la \textit{magnitud} de la funci\'on fuente $S_0$ (v\'ia $\Psi_0$), pero la \textit{forma angular} de $I(\mu)$ est\'a dominada por el factor $1 - e^{-\Delta\tau/\mu}$ que siempre satura en el horizonte.
+\end{keyresult}
+
+% ======================================================================
+\section*{Referencias}
+% ======================================================================
+
+\begin{enumerate}
+\item Stamnes, K., Tsay, S.-C., Wiscombe, W., Laszlo, I. (2000). \textit{DISORT, a General-Purpose Fortran Program for Discrete-Ordinate-Method Radiative Transfer in Scattering and Emitting Layered Media: Documentation of Methodology.} DISORT Report v1.1.
+\item Stamnes, K. y Swanson, R.A. (1981). ``A New Look at the Discrete Ordinate Method for Radiative Transfer Calculations in Anisotropically Scattering Atmospheres.'' \textit{J. Atmos. Sci.}, 38, 387--399.
+\item Stamnes, K. (1982a). ``On the computation of angular distributions of radiation in planetary atmospheres.'' \textit{J. Quant. Spectrosc. Radiat. Transfer}, 28, 47--51.
+\end{enumerate}
+
+\end{document}
